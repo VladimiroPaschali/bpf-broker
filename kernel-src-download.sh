@@ -15,10 +15,10 @@ source "$(dirname "$(readlink -f "$0")")/env.sh"
 # Configurable parameters
 # -----------------------
 # Where to download the tarball and verification data.
-TARGETDIR=${BMCCACHE_BASE_PATH}
+TARGETDIR=${BPF_PUBSUB_BASE_PATH}
 
 # What kernel version do you want?
-VER=${BMCCACHE_KERNEL_VERSION}
+VER=${BPF_PUBSUB_KERNEL_VERSION}
 
 # If you set this to empty value, we'll make a temporary
 # directory and fetch the verification keys from the
