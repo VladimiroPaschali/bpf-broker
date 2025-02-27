@@ -29,6 +29,7 @@ enum {
 	BMC_PROG_XDP_PREPARE_PACKET,
 	BMC_PROG_XDP_WRITE_REPLY,
 	BMC_PROG_XDP_INVALIDATE_CACHE,
+	BMC_PROG_XDP_STORE_MSG,
 
 	BMC_PROG_XDP_MAX
 };
@@ -49,14 +50,8 @@ struct bmc_cache_entry {
 };
 
 struct bmc_stats {
-	unsigned int get_recv_count;			// Number of GET command received
-	unsigned int set_recv_count;			// Number of SET command received
-	unsigned int get_resp_count;			// Number of GET command reply analyzed
-	unsigned int hit_misprediction;			// Number of keys that were expected to hit but did not (either because of a hash colision or a race with an invalidation/update)
-	unsigned int hit_count;				// Number of HIT in kernel cache
-	unsigned int miss_count;			// Number of MISS in kernel cache
-	unsigned int update_count;			// Number of kernel cache updates
-	unsigned int invalidation_count;		// Number of kernel cache entry invalidated
+	unsigned int pub_recv_count;
+	unsigned int sub_recv_count;
 };
 
 #endif
