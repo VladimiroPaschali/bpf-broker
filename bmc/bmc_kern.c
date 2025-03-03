@@ -110,7 +110,7 @@ int store_msg(struct xdp_md *ctx)
     if (!fd) return XDP_PASS;
 
 	unsigned int i = 0;
-	__u32 copy_limit = 256;
+	__u32 copy_limit = 100;
 	unsigned int data_len = 0;
 	bpf_printk("Copy limit: %u", copy_limit);
 
@@ -126,11 +126,70 @@ int store_msg(struct xdp_md *ctx)
 	bpf_printk("Total stored bytes: %u", data_len);
 	fd->len = data_len;
 
-	int err = bpf_xdp_adjust_tail(ctx, -fd->len);
-	if (err) {
-		bpf_printk("Failed to truncate packet, err: %d", err);
-	}
+	// int err = bpf_xdp_adjust_tail(ctx, -1);
+	// if (err < 0) {
+	// 	bpf_printk("Failed to truncate packet, err: %d", err);
+	// }
     return XDP_PASS;
+}
+
+SEC("tc")
+int tc_ingress_logger(struct __sk_buff *skb)
+{
+    void *data_end = (void *)(long)skb->data_end;
+    void *data = (void *)(long)skb->data;
+    struct ethhdr *eth = data;
+    struct iphdr *ip;
+    struct udphdr *udp;
+    struct tcphdr *tcp;
+    char *payload;
+    __be16 dport;
+
+    if ((void *)eth + sizeof(*eth) > data_end)
+        return TC_ACT_OK;
+
+    ip = (void *)eth + sizeof(*eth);
+    if ((void *)ip + sizeof(*ip) > data_end)
+        return TC_ACT_OK;
+
+    switch (ip->protocol) {
+        case IPPROTO_UDP:
+            udp = (struct udphdr *)((void *)ip + sizeof(*ip));
+            if ((void *)udp + sizeof(*udp) > data_end)
+                return TC_ACT_OK;
+            dport = udp->dest;
+            payload = (void *)udp + sizeof(*udp);
+            break;
+        case IPPROTO_TCP:
+            tcp = (struct tcphdr *)((void *)ip + sizeof(*ip));
+            if ((void *)tcp + sizeof(*tcp) > data_end)
+                return TC_ACT_OK;
+            dport = tcp->dest;
+            payload = (void *)tcp + sizeof(*tcp);
+            break;
+        default:
+            return TC_ACT_OK;
+    }
+
+    if (ip->protocol == IPPROTO_UDP && ntohs(dport) == 11211) {
+        bpf_printk("TC ingress: Packet to port 11211 detected, already processed by XDP");
+        unsigned int zero = 0, off = 0;
+
+#pragma clang loop unroll(disable)
+        while (off < 100 && (payload + off + 1 < data_end) && payload[off] == ' ') {
+            off++;
+        }
+
+        bpf_printk("TC ingress: Off=%u", off);
+        if (off < 100) {
+            if ((void *)(long)skb->data + sizeof(*eth) + sizeof(*ip) + sizeof(*udp) + off >= data_end) {
+                return TC_ACT_OK;
+            }
+            bpf_printk("TC ingress: Packet matches XDP-filtered criteria");
+        }
+    }
+
+    return TC_ACT_OK;
 }
 
 char LICENSE[] SEC("license") = "GPL";

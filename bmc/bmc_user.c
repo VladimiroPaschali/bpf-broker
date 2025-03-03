@@ -31,6 +31,8 @@ struct bpf_progs_desc {
 static struct bpf_progs_desc progs[] = {
     {"rx_filter", BPF_PROG_TYPE_XDP, 0, -1, NULL},
 	{"store_msg", BPF_PROG_TYPE_XDP, 0, BMC_PROG_XDP_STORE_MSG, NULL},
+
+	{"tc_ingress_logger", BPF_PROG_TYPE_SCHED_CLS, 1, -1, NULL},
 };
 
 
