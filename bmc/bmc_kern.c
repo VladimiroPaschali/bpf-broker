@@ -126,10 +126,12 @@ int store_msg(struct xdp_md *ctx)
 	bpf_printk("Total stored bytes: %u", data_len);
 	fd->len = data_len;
 
+    // TODO: adjust tail and fix checksum
 	// int err = bpf_xdp_adjust_tail(ctx, -1);
 	// if (err < 0) {
 	// 	bpf_printk("Failed to truncate packet, err: %d", err);
 	// }
+    
     return XDP_PASS;
 }
 
@@ -186,6 +188,33 @@ int tc_ingress_logger(struct __sk_buff *skb)
                 return TC_ACT_OK;
             }
             bpf_printk("TC ingress: Packet matches XDP-filtered criteria");
+    
+            __u8 temp_mac[ETH_ALEN];
+            __builtin_memcpy(temp_mac, eth->h_source, ETH_ALEN);
+            __builtin_memcpy(eth->h_source, eth->h_dest, ETH_ALEN);
+            __builtin_memcpy(eth->h_dest, temp_mac, ETH_ALEN);
+    
+            __be32 temp_ip = ip->saddr;
+            ip->saddr = ip->daddr;
+            ip->daddr = temp_ip;
+    
+            if (ip->protocol == IPPROTO_UDP) {
+                __be16 temp_port = udp->source;
+                udp->source = udp->dest;
+                udp->dest = temp_port;
+            } else if (ip->protocol == IPPROTO_TCP) {
+                __be16 temp_port = tcp->source;
+                tcp->source = tcp->dest;
+                tcp->dest = temp_port;
+            }
+    
+            for (int i = 0; i < 2; i++) {
+                int err = bpf_clone_redirect(skb, skb->ifindex, 0);
+                if (err < 0) {
+                    bpf_printk("Failed to clone packet, err: %d", err);
+                }
+                bpf_printk("Cloned packet %d successfully", i + 1);
+            }
         }
     }
 
