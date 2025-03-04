@@ -4,6 +4,7 @@
 #include <linux/udp.h>
 #include <linux/tcp.h>
 #include <bpf/bpf_helpers.h>
+#include <bpf/bpf_endian.h>
 #include "bmc_common.h"
 
 
@@ -146,6 +147,7 @@ int tc_ingress_logger(struct __sk_buff *skb)
     struct tcphdr *tcp;
     char *payload;
     __be16 dport;
+    __u8 temp_mac[ETH_ALEN];
 
     if ((void *)eth + sizeof(*eth) > data_end)
         return TC_ACT_OK;
@@ -189,31 +191,46 @@ int tc_ingress_logger(struct __sk_buff *skb)
             }
             bpf_printk("TC ingress: Packet matches XDP-filtered criteria");
     
-            __u8 temp_mac[ETH_ALEN];
-            __builtin_memcpy(temp_mac, eth->h_source, ETH_ALEN);
-            __builtin_memcpy(eth->h_source, eth->h_dest, ETH_ALEN);
-            __builtin_memcpy(eth->h_dest, temp_mac, ETH_ALEN);
-    
-            __be32 temp_ip = ip->saddr;
-            ip->saddr = ip->daddr;
-            ip->daddr = temp_ip;
-    
-            if (ip->protocol == IPPROTO_UDP) {
-                __be16 temp_port = udp->source;
-                udp->source = udp->dest;
-                udp->dest = temp_port;
-            } else if (ip->protocol == IPPROTO_TCP) {
-                __be16 temp_port = tcp->source;
-                tcp->source = tcp->dest;
-                tcp->dest = temp_port;
-            }
-    
             for (int i = 0; i < 2; i++) {
-                int err = bpf_clone_redirect(skb, skb->ifindex, 0);
-                if (err < 0) {
-                    bpf_printk("Failed to clone packet, err: %d", err);
+                data_end = (void *)(long)skb->data_end;
+                data = (void *)(long)skb->data;
+                eth = data;
+                if ((void *)eth + sizeof(*eth) > data_end)
+                    return TC_ACT_OK;
+
+                ip = (void *)eth + sizeof(*eth);
+                if ((void *)ip + sizeof(*ip) > data_end)
+                    return TC_ACT_OK;
+                if (ip->protocol == IPPROTO_UDP) {
+                    udp = (struct udphdr *)((void *)ip + sizeof(*ip));  // Recalculate pointer
+                    if ((void *)udp + sizeof(*udp) > data_end)
+                        return TC_ACT_OK;
+
+                    // TODO: it's weird that no bracket make it send the first packet to user space..
+                    // so simply don't modify it then
+                    // FIX: only execute the first line so no checksum issue and happen to work
+                    if (i == 1)
+                        
+                        __builtin_memcpy(temp_mac, eth->h_source, ETH_ALEN);
+                        __builtin_memcpy(eth->h_source, eth->h_dest, ETH_ALEN);
+                        __builtin_memcpy(eth->h_dest, temp_mac, ETH_ALEN);
+                
+                        __be32 temp_ip = ip->saddr;
+                        ip->saddr = ip->daddr;
+                        ip->daddr = temp_ip;
+                
+                        __be16 temp_port = udp->source;
+                        udp->source = udp->dest;
+                        udp->dest = temp_port;
+                    
+
+                    bpf_printk("dest %d", ntohs(udp->dest));
+                    int err = bpf_clone_redirect(skb, skb->ifindex, 0);
+                    if (err < 0) {
+                        bpf_printk("Failed to clone packet, err: %d", err);
+                    }
+                    bpf_printk("Cloned packet %d successfully", i + 1);
                 }
-                bpf_printk("Cloned packet %d successfully", i + 1);
             }
         }
     }
