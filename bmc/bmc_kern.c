@@ -139,6 +139,9 @@ int store_msg(struct xdp_md *ctx)
 SEC("tc")
 int tc_ingress_logger(struct __sk_buff *skb)
 {
+    __u64 start_time, end_time, processing_time_ns;
+    start_time = bpf_ktime_get_ns();
+
     void *data_end = (void *)(long)skb->data_end;
     void *data = (void *)(long)skb->data;
     struct ethhdr *eth = data;
@@ -190,8 +193,20 @@ int tc_ingress_logger(struct __sk_buff *skb)
                 return TC_ACT_OK;
             }
             bpf_printk("TC ingress: Packet matches XDP-filtered criteria");
+
+            __builtin_memcpy(temp_mac, eth->h_source, ETH_ALEN);
+            __builtin_memcpy(eth->h_source, eth->h_dest, ETH_ALEN);
+            __builtin_memcpy(eth->h_dest, temp_mac, ETH_ALEN);
     
-            for (int i = 0; i < 2; i++) {
+            __be32 temp_ip = ip->saddr;
+            ip->saddr = ip->daddr;
+            ip->daddr = temp_ip;
+    
+            __be16 temp_port = udp->source;
+            udp->source = udp->dest;
+            udp->dest = temp_port;
+    
+            for (int i = 0; i < 100; i++) {
                 data_end = (void *)(long)skb->data_end;
                 data = (void *)(long)skb->data;
                 eth = data;
@@ -206,24 +221,6 @@ int tc_ingress_logger(struct __sk_buff *skb)
                     if ((void *)udp + sizeof(*udp) > data_end)
                         return TC_ACT_OK;
 
-                    // TODO: it's weird that no bracket make it send the first packet to user space..
-                    // so simply don't modify it then
-                    // FIX: only execute the first line so no checksum issue and happen to work
-                    if (i == 1)
-                        
-                        __builtin_memcpy(temp_mac, eth->h_source, ETH_ALEN);
-                        __builtin_memcpy(eth->h_source, eth->h_dest, ETH_ALEN);
-                        __builtin_memcpy(eth->h_dest, temp_mac, ETH_ALEN);
-                
-                        __be32 temp_ip = ip->saddr;
-                        ip->saddr = ip->daddr;
-                        ip->daddr = temp_ip;
-                
-                        __be16 temp_port = udp->source;
-                        udp->source = udp->dest;
-                        udp->dest = temp_port;
-                    
-
                     bpf_printk("dest %d", ntohs(udp->dest));
                     int err = bpf_clone_redirect(skb, skb->ifindex, 0);
                     if (err < 0) {
@@ -232,6 +229,12 @@ int tc_ingress_logger(struct __sk_buff *skb)
                     bpf_printk("Cloned packet %d successfully", i + 1);
                 }
             }
+
+            end_time = bpf_ktime_get_ns();
+            processing_time_ns = end_time - start_time;
+
+            bpf_printk("TC: Processing time = %llu ns\n", processing_time_ns);
+
         }
     }
 
