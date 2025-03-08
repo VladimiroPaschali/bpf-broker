@@ -101,6 +101,8 @@ int rx_filter(struct xdp_md *ctx)
 SEC("xdp")
 int store_msg(struct xdp_md *ctx)
 {
+    __u64 start_time;
+    
 	void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;
     char *payload = data + sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr);
@@ -126,6 +128,8 @@ int store_msg(struct xdp_md *ctx)
 
 	bpf_printk("Total stored bytes: %u", data_len);
 	fd->len = data_len;
+    start_time = bpf_ktime_get_ns();
+    bpf_printk("XDP: Start time = %llu ns\n", start_time);
 
     // TODO: adjust tail and fix checksum
 	// int err = bpf_xdp_adjust_tail(ctx, -1);
@@ -140,7 +144,6 @@ SEC("tc")
 int tc_ingress_logger(struct __sk_buff *skb)
 {
     __u64 start_time, end_time, processing_time_ns;
-    start_time = bpf_ktime_get_ns();
 
     void *data_end = (void *)(long)skb->data_end;
     void *data = (void *)(long)skb->data;
@@ -179,7 +182,9 @@ int tc_ingress_logger(struct __sk_buff *skb)
     }
 
     if (ip->protocol == IPPROTO_UDP && ntohs(dport) == 11211) {
-        bpf_printk("TC ingress: Packet to port 11211 detected, already processed by XDP");
+        start_time = bpf_ktime_get_ns();
+        bpf_printk("TC: Start time = %llu ns\n", start_time);
+        // bpf_printk("TC ingress: Packet to port 11211 detected, already processed by XDP");
         unsigned int zero = 0, off = 0;
 
 #pragma clang loop unroll(disable)
