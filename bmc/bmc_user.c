@@ -29,10 +29,7 @@ struct bpf_progs_desc {
 };
 
 static struct bpf_progs_desc progs[] = {
-    {"rx_filter", BPF_PROG_TYPE_XDP, 0, -1, NULL},
-	{"store_msg", BPF_PROG_TYPE_XDP, 0, BMC_PROG_XDP_STORE_MSG, NULL},
-
-	{"tc_ingress_logger", BPF_PROG_TYPE_SCHED_CLS, 1, -1, NULL},
+	{"tc_ingress_broker", BPF_PROG_TYPE_SCHED_CLS, 1, -1, NULL},
 };
 
 
@@ -58,11 +55,10 @@ static int print_bpf_verifier(enum libbpf_print_level level,
 int main(int argc, char *argv[])
 {
 	struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY};
-	int map_progs_xdp_fd, xdp_main_prog_fd, map_progs_tc_fd, map_progs_fd;
+	int map_progs_tc_fd, map_progs_fd;
 	struct bpf_object *obj;
 	char filename[PATH_MAX];
 	int err, prog_count;
-	__u32 xdp_flags = 0;
 	int *interfaces_idx;
 	int ret = 0;
 
@@ -87,7 +83,6 @@ int main(int argc, char *argv[])
         }
     }
 
-	xdp_flags |= XDP_FLAGS_DRV_MODE;
 	nr_cpus = libbpf_num_possible_cpus();
 
 	snprintf(filename, sizeof(filename), "%s_kern.o", argv[0]);
@@ -129,12 +124,6 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	map_progs_xdp_fd = bpf_object__find_map_fd_by_name(obj, "map_progs_xdp");
-	if (map_progs_xdp_fd < 0) {
-		fprintf(stderr, "Error: bpf_object__find_map_fd_by_name failed\n");
-		return 1;
-	}
-
 	map_progs_tc_fd = bpf_object__find_map_fd_by_name(obj, "map_progs_tc");
 	if (map_progs_tc_fd < 0) {
 		fprintf(stderr, "Error: bpf_object__find_map_fd_by_name failed\n");
@@ -159,9 +148,6 @@ int main(int argc, char *argv[])
 			}
 
 			switch (progs[i].type) {
-			case BPF_PROG_TYPE_XDP:
-				map_progs_fd = map_progs_xdp_fd;
-				break;
 			case BPF_PROG_TYPE_SCHED_CLS:
 				map_progs_fd = map_progs_tc_fd;
 				break;
@@ -202,21 +188,6 @@ retry:
 		}
 	}
 
-	xdp_main_prog_fd = bpf_program__fd(progs[0].prog);
-	if (xdp_main_prog_fd < 0) {
-		fprintf(stderr, "Error: bpf_program__fd failed\n");
-		return 1;
-	}
-
-	for (int i = 0; i < interface_count; i++) {
-		if (bpf_xdp_attach(interfaces_idx[i], xdp_main_prog_fd, xdp_flags, NULL) < 0) {
-			fprintf(stderr, "Error: bpf_xdp_attach failed for interface %d\n", interfaces_idx[i]);
-			return 1;
-		} else {
-			printf("Main BPF program attached to XDP on interface %d\n", interfaces_idx[i]);
-		}
-	}
-
 	int sig, quit = 0;
 
 	err = sigprocmask(SIG_BLOCK, &signal_mask, NULL);
@@ -242,10 +213,6 @@ retry:
 				fprintf(stderr, "Unknown signal\n");
 				break;
 		}
-	}
-
-	for (int i = 0; i < interface_count; i++) {
-		bpf_xdp_attach(interfaces_idx[i], -1, xdp_flags, NULL);
 	}
 
 	return ret;
