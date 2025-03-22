@@ -8,10 +8,15 @@
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 
+#include <arpa/inet.h>    // for inet_ntoa()
+#include <netinet/in.h>   // for sockaddr_in
+#include <sys/socket.h>   // for socket
+#include <fcntl.h>        // for fcntl()
+
 #define MAX_TOPIC_ID_CHARS 20
 
 
-int add_subscriber(int outer_fd, const char *topic_name, __u32 ip, __u32 dummy_val) {
+int add_subscriber(int outer_fd, const char *topic_name, __u32 ip, __u32 port) {
     char topic_key[MAX_TOPIC_ID_CHARS] = {0};
     size_t len = strlen(topic_name);
     if (len >= MAX_TOPIC_ID_CHARS) {
@@ -32,14 +37,18 @@ int add_subscriber(int outer_fd, const char *topic_name, __u32 ip, __u32 dummy_v
         return -1;
     }
 
-    // Insert subscriber IP into the inner map
-    if (bpf_map_update_elem(inner_fd, &ip, &dummy_val, BPF_ANY) < 0) {
+    // Insert port directly as value
+    if (bpf_map_update_elem(inner_fd, &ip, &port, BPF_ANY) < 0) {
         perror("Failed to insert subscriber into inner map");
         close(inner_fd);
         return -1;
     }
 
-    printf("Added subscriber IP 0x%x -> %u to topic '%s'\n", ip, dummy_val, topic_name);
+    char ip_str[INET_ADDRSTRLEN];
+    struct in_addr ip_addr = { .s_addr = htonl(ip) };
+    inet_ntop(AF_INET, &ip_addr, ip_str, sizeof(ip_str));
+
+    printf("Added subscriber IP %s:%u to topic '%s'\n", ip_str, port, topic_name);
     close(inner_fd);
     return 0;
 }
@@ -52,38 +61,49 @@ int add_topic(int outer_fd, const char *topic_name) {
     char topic_key[MAX_TOPIC_ID_CHARS] = {0};
     size_t len = strlen(topic_name);
     if (len >= MAX_TOPIC_ID_CHARS) {
-        fprintf(stderr, "Topic name too long (max %d chars)\n", MAX_TOPIC_ID_CHARS - 1);
+        fprintf(stderr, "[add_topic] Topic name too long (max %d chars)\n", MAX_TOPIC_ID_CHARS - 1);
         return -1;
     }
     memcpy(topic_key, topic_name, len);
 
     // Early return if topic already exists
-    if (bpf_map_lookup_elem(outer_fd, topic_key, &inner_fd) == 0) {
-        printf("Topic '%s' already exists (inner map fd = %d)\n", topic_name, inner_fd);
+    int tmp_fd = 0;
+    int ret = bpf_map_lookup_elem(outer_fd, topic_key, &tmp_fd);
+    if (ret == 0) {
+        printf("[add_topic] Topic '%s' already exists (inner map fd = %d)\n", topic_name, tmp_fd);
         return 0;
     }
 
-    // Create inner subscriber map
+    // Define the inner map attributes
     union bpf_attr attr = {
         .map_type = BPF_MAP_TYPE_HASH,
         .key_size = sizeof(__u32),
         .value_size = sizeof(__u32),
         .max_entries = 256,
     };
+
+    // Create the inner map
     inner_fd = syscall(__NR_bpf, BPF_MAP_CREATE, &attr, sizeof(attr));
     if (inner_fd < 0) {
-        perror("Failed to create inner subscriber_map");
+        perror("[add_topic] Failed to create inner subscriber_map");
         return -1;
     }
 
-    // Insert inner map into outer map
-    if (bpf_map_update_elem(outer_fd, topic_key, &inner_fd, BPF_ANY) < 0) {
-        perror("Failed to insert topic into topic_subscribe");
+    // Need to cast inner_fd to __u32 for insertion
+    __u32 inner_fd_u32 = (__u32)inner_fd;
+
+    // Insert into outer map
+    int update_ret = bpf_map_update_elem(outer_fd, topic_key, &inner_fd_u32, BPF_ANY);
+    // printf("[add_topic] bpf_map_update_elem(outer_fd=%d, key='%s', inner_fd_u32=%u) => %d\n",
+    //        outer_fd, topic_key, inner_fd_u32, update_ret);
+
+    if (update_ret < 0) {
+        perror("[add_topic] Failed to insert topic into topic_subscribe");
         close(inner_fd);
         return -1;
     }
 
-    printf("Added topic '%s' with inner map fd %d\n", topic_name, inner_fd);
+    printf("[add_topic] Added topic '%s' with inner map fd %d\n", topic_name, inner_fd);
     close(inner_fd);
     return 0;
 }
@@ -100,10 +120,78 @@ int main() {
     add_topic(outer_fd, "test");
 
     // Add a subscriber to that topic
-    __u32 ip = (192 << 24) | (168 << 16) | (1 << 8) | 100;  // 192.168.1.100
-    add_subscriber(outer_fd, "test", ip, 1);
+    __u32 ip = (192 << 24) | (168 << 16) | (1 << 8) | 100;
+    __u16 port = 35000;
+    add_subscriber(outer_fd, "test", ip, port);
 
+
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        perror("socket");
+        return 1;
+    }
+
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_addr.s_addr = INADDR_ANY,
+        .sin_port = htons(11211),
+    };
+
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        return 1;
+    }
+
+    printf("Listening for UDP on port 11211...\n");
+
+    char buf[1024];
+    struct sockaddr_in client;
+    socklen_t client_len = sizeof(client);
+
+    while (1) {
+        ssize_t len = recvfrom(sock, buf, sizeof(buf) - 1, 0,
+                               (struct sockaddr *)&client, &client_len);
+        if (len < 0) {
+            perror("recvfrom");
+            continue;
+        }
+
+        buf[len] = '\0';  // Null-terminate for safe parsing
+
+        if (strncmp(buf, "REGISTER ", 9) == 0) {
+            char topic_key[MAX_TOPIC_ID_CHARS] = {0};
+
+            // Extract topic name (rest of line after "REGISTER ")
+            const char *topic_raw = buf + 9;
+
+            // Trim trailing newline/space and copy up to MAX_TOPIC_ID_CHARS
+            size_t topic_len = strnlen(topic_raw, MAX_TOPIC_ID_CHARS);
+            strncpy(topic_key, topic_raw, topic_len);
+
+            // Trim trailing newline if present
+            for (int i = 0; i < MAX_TOPIC_ID_CHARS; i++) {
+                if (topic_key[i] == '\n' || topic_key[i] == '\r') {
+                    topic_key[i] = '\0';
+                    break;
+                }
+            }
+
+            // Convert source IP
+            __u32 ip = ntohl(client.sin_addr.s_addr);
+            __u32 port = ntohs(client.sin_port);
+
+            printf("REGISTER '%s' from %s\n",
+                   topic_key, inet_ntoa(client.sin_addr));
+
+            if (add_topic(outer_fd, topic_key) == 0) {
+                add_subscriber(outer_fd, topic_key, ip, port);
+            }
+        } else {
+            printf("Unknown command: '%s'\n", buf);
+        }
+    }
+
+    close(sock);
     close(outer_fd);
-
     return 0;
 }

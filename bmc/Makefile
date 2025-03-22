@@ -73,6 +73,7 @@ clean:
 	rm -f $(KERN_OBJECTS)
 	rm -f $(USER_OBJECTS)
 	rm -f $(OBJECT_LOADBPF)
+	rm -f $(PROTO)
 
 dependencies: verify_target_bpf
 
@@ -140,5 +141,3 @@ $(PROTO): $(PROTO_OBJECTS) $(LIBBPF)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 all: $(PROTO)
-clean:
-	rm -f $(PROTO)

@@ -2,3 +2,4 @@
 *.ll
 *.o
 bmc
+bmc_proto
