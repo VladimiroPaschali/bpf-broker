@@ -12,21 +12,18 @@
 #define MAX_SUBSCRIBERS 256
 #define MAX_TOPIC_ID_CHARS 20
 
-#ifndef BPF_FUNC_map_get_next_key
-#define BPF_FUNC_map_get_next_key 5
-#endif
 
-static int (*bpf_map_get_next_key)(void *map, const void *key, void *next_key) = (void *) BPF_FUNC_map_get_next_key;
+struct callback_ctx {
+    struct __sk_buff *skb;
+};
 
 /* program maps */
-
 struct {
     __uint(type, BPF_MAP_TYPE_PROG_ARRAY);
     __uint(key_size, sizeof(u32));
     __uint(value_size, sizeof(u32));
     __uint(max_entries, BMC_PROG_TC_MAX);
 } map_progs_tc SEC(".maps");
-
 
 // Inner map: subscriber IP -> dummy (u8)
 struct subscriber_map {
@@ -42,10 +39,9 @@ typedef struct subscriber_map subscriber_map_t;
 struct topic_subscriber_maps {
     __uint(type, BPF_MAP_TYPE_HASH_OF_MAPS);
     __uint(max_entries, MAX_TOPIC_ID);
-    __type(key, char[MAX_TOPIC_ID_CHARS]);                       // topic ID
+    __type(key, char[MAX_TOPIC_ID_CHARS]);
     __array(values, subscriber_map_t);
 } topic_subscribe SEC(".maps");
-
 
 static __inline int starts_with(const char *p, const char *prefix, void *end) {
     int i = 0;
@@ -54,33 +50,6 @@ static __inline int starts_with(const char *p, const char *prefix, void *end) {
             return 0;
     }
     return 1;
-}
-
-// Helper: Parse numeric topic ID
-static __inline int parse_topic_id(char *s, void *end, __u16 *out_id) {
-    int val = 0;
-    int digits = 0;
-
-#pragma clang loop unroll(disable)
-    for (int i = 0; i < MAX_TOPIC_ID_CHARS; i++) {
-        if ((void *)(s + i + 1) > end)
-            break;
-
-        char c;
-        bpf_probe_read_kernel(&c, sizeof(c), s + i); // safe access
-
-        if (c < '0' || c > '9')
-            break;
-
-        val = val * 10 + (c - '0');
-        digits++;
-    }
-
-    if (digits == 0 || digits >= MAX_TOPIC_ID_CHARS)
-        return -1;
-
-    *out_id = (__u16)val;
-    return 0;
 }
 
 static __inline int extract_topic_id(char *s, void *end, char *out_id) {
@@ -97,6 +66,13 @@ static __inline int extract_topic_id(char *s, void *end, char *out_id) {
         out_id[i] = c;
     }
     out_id[MAX_TOPIC_ID_CHARS - 1] = '\0';
+    return 0;
+}
+
+static long callback_fn(struct bpf_map *map, const void *key, void *value, void *ctx_void)
+{
+    struct callback_ctx *ctx = (struct callback_ctx *)ctx_void;
+    bpf_clone_redirect(ctx->skb, ctx->skb->ifindex, 0);
     return 0;
 }
 
@@ -142,26 +118,8 @@ int tc_ingress_broker(struct __sk_buff *skb)
 
     char *payload = (void *)udp + sizeof(*udp);
 
-    // -------- Handle SUBSCRIBE --------
-    if (starts_with(payload, "SUBSCRIBE ", data_end)) {
-       char topic_id[MAX_TOPIC_ID_CHARS] = {};
-        if (extract_topic_id(payload + 10, data_end, topic_id) < 0)
-            return TC_ACT_OK;
-
-        __u32 subscriber_ip = ip->saddr;
-        __u8 dummy = 1;
-
-        void *inner_map = bpf_map_lookup_elem(&topic_subscribe, &topic_id);
-        if (!inner_map)
-            return TC_ACT_OK;
-
-        bpf_map_update_elem(inner_map, &subscriber_ip, &dummy, BPF_ANY);
-        bpf_printk("SUBSCRIBE topic %d ← IP 0x%x\n", topic_id, subscriber_ip);
-        return TC_ACT_OK;
-    }
-
-    // -------- Handle PUBLISH --------
     if (starts_with(payload, "PUBLISH ", data_end)) {
+
         char topic_id[MAX_TOPIC_ID_CHARS] = {};
         if (extract_topic_id(payload + 8, data_end, topic_id) < 0)
             return TC_ACT_OK;
@@ -170,22 +128,8 @@ int tc_ingress_broker(struct __sk_buff *skb)
         if (!inner_map)
             return TC_ACT_OK;
 
-        struct ethhdr *eth = data;
-        struct iphdr *ip = (void *)(eth + 1);
-        struct udphdr *udp = (void *)(ip + 1);
+        bpf_printk("PUBLISH find topic");
 
-        __be32 orig_saddr = ip->saddr;
-        __be16 orig_sport = udp->source;
-
-        __u32 zero = 0;
-        __u32 key = 0;
-        __u32 next_key = 0;
-
-        // Start iteration over inner map keys (subscriber IPs)
-        if (bpf_map_get_next_key(inner_map, NULL, &key) < 0)
-            return TC_ACT_OK;
-
-        // Modify headers
         __u8 temp_mac[ETH_ALEN];
         __builtin_memcpy(temp_mac, eth->h_source, ETH_ALEN);
         __builtin_memcpy(eth->h_source, eth->h_dest, ETH_ALEN);
@@ -199,32 +143,20 @@ int tc_ingress_broker(struct __sk_buff *skb)
         udp->source = udp->dest;
         udp->dest = temp_port;
 
-#pragma clang loop unroll(disable)
-        for (int j = 0; j < 32; j++) {
-            
-            if (bpf_map_get_next_key(inner_map, &key, &next_key) < 0)
-                break;
-            key = next_key;
+        struct callback_ctx ctx = {
+            .skb = skb,
+        };
 
-            // Re-derive packet pointers
-            data = (void *)(long)skb->data;
-            data_end = (void *)(long)skb->data_end;
+        bpf_printk("PUBLISH before loop");
+        // char *context = "This string will pass to every callback call";
+        long (*cb_p)(struct bpf_map *, const void *, void *, void *) = &callback_fn;
 
-            eth = data;
-            if ((void *)(eth + 1) > data_end) break;
-            ip = (void *)(eth + 1);
-            if ((void *)(ip + 1) > data_end) break;
-            udp = (void *)(ip + 1);
-            if ((void *)(udp + 1) > data_end) break;
+        bpf_for_each_map_elem(inner_map, cb_p, &ctx, 0);
 
-            // Write fields — now safe
-            ip->daddr = key;
-            udp->dest = udp->source;
-
-            bpf_clone_redirect(skb, skb->ifindex, 0);
-        }
         return TC_ACT_SHOT;
     }
+
+    return TC_ACT_OK;
 }
 
 char LICENSE[] SEC("license") = "GPL";
