@@ -188,6 +188,32 @@ retry:
 		}
 	}
 
+	// Pin topic_subscribe map for use in userspace 
+	struct bpf_map *map;
+	bpf_object__for_each_map(map, obj) {
+		const char *map_name = bpf_map__name(map);
+		if (strcmp(map_name, "topic_subscribe") == 0) {
+			char path[PATH_MAX];
+			snprintf(path, sizeof(path), "%s/%s", BPF_SYSFS_ROOT, map_name);
+		retry_pin:
+			if (bpf_map__pin(map, path)) {
+				if (errno == EEXIST) {
+					printf("Map already pinned at %s, unpinning and retrying...\n", path);
+					if (bpf_map__unpin(map, path)) {
+						fprintf(stderr, "Failed to unpin existing map %s\n", path);
+						exit(EXIT_FAILURE);
+					}
+					goto retry_pin;
+				} else {
+					fprintf(stderr, "Failed to pin map %s: %s\n", path, strerror(errno));
+					exit(EXIT_FAILURE);
+				}
+			} else {
+				printf("Successfully pinned map '%s' at %s\n", map_name, path);
+			}
+		}
+	}
+
 	int sig, quit = 0;
 
 	err = sigprocmask(SIG_BLOCK, &signal_mask, NULL);

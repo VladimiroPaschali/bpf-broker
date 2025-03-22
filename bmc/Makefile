@@ -36,7 +36,7 @@ CFLAGS := -g -O2 -Wall
 CFLAGS += -I.
 CFLAGS += -I$(LINUX_LIB_PATH)
 # CFLAGS += -I$(LINUX_TOOLS_PATH)/include/uapi
-EXTRA_CFLAGS_TMP := -I/usr/include -I/usr/include/bpf
+EXTRA_CFLAGS_TMP := -I/usr/include -I/usr/include/bpf -I$(LINUX_TOOLS_PATH)/include
 
 LDFLAGS ?= -L$(LIBBPF_PATH) -l:libbpf.a -lelf -lz
 
@@ -58,7 +58,7 @@ EXTRA_CFLAGS=-Werror
 
 ###
 
-all: dependencies $(TARGETS) $(KERN_OBJECTS)
+all: dependencies $(TARGETS) $(KERN_OBJECTS) $(PROTO)
 
 .PHONY: clean dependencies verify_cmds verify_target_bpf $(CLANG) $(LLC)
 
@@ -131,3 +131,14 @@ $(KERN_OBJECTS): %.o: %.c
 
 $(TARGETS): %: %_user.c $(OBJECTS) $(LIBBPF)
 	$(CC) $(CFLAGS) $(OBJECTS) -o $@ $< $(LIBBPF) $(LDFLAGS)
+
+
+PROTO := bmc_proto
+PROTO_OBJECTS := bmc_proto.o
+
+$(PROTO): $(PROTO_OBJECTS) $(LIBBPF)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+all: $(PROTO)
+clean:
+	rm -f $(PROTO)

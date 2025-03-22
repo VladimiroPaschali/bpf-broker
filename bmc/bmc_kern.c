@@ -10,7 +10,7 @@
 
 #define MAX_TOPIC_ID 10
 #define MAX_SUBSCRIBERS 256
-#define MAX_TOPIC_ID_CHARS 10
+#define MAX_TOPIC_ID_CHARS 20
 
 #ifndef BPF_FUNC_map_get_next_key
 #define BPF_FUNC_map_get_next_key 5
@@ -42,9 +42,9 @@ typedef struct subscriber_map subscriber_map_t;
 struct topic_subscriber_maps {
     __uint(type, BPF_MAP_TYPE_HASH_OF_MAPS);
     __uint(max_entries, MAX_TOPIC_ID);
-    __type(key, u16);                       // topic ID
+    __type(key, char[MAX_TOPIC_ID_CHARS]);                       // topic ID
     __array(values, subscriber_map_t);
-} topic_subscriber_maps SEC(".maps");
+} topic_subscribe SEC(".maps");
 
 
 static __inline int starts_with(const char *p, const char *prefix, void *end) {
@@ -63,7 +63,7 @@ static __inline int parse_topic_id(char *s, void *end, __u16 *out_id) {
 
 #pragma clang loop unroll(disable)
     for (int i = 0; i < MAX_TOPIC_ID_CHARS; i++) {
-        if ((void *)(s + i + 1) > end)  // ✅ ensure safe access
+        if ((void *)(s + i + 1) > end)
             break;
 
         char c;
@@ -82,6 +82,24 @@ static __inline int parse_topic_id(char *s, void *end, __u16 *out_id) {
     *out_id = (__u16)val;
     return 0;
 }
+
+static __inline int extract_topic_id(char *s, void *end, char *out_id) {
+#pragma clang loop unroll(disable)
+    for (int i = 0; i < MAX_TOPIC_ID_CHARS; i++) {
+        if ((void *)(s + i + 1) > end)
+            return -1;
+        char c;
+        bpf_probe_read_kernel(&c, sizeof(c), s + i);
+        if (c == ' ' || c == '\0' || c == '\n') {
+            out_id[i] = '\0';
+            return 0;
+        }
+        out_id[i] = c;
+    }
+    out_id[MAX_TOPIC_ID_CHARS - 1] = '\0';
+    return 0;
+}
+
 
 SEC("tc")
 int tc_ingress_broker(struct __sk_buff *skb)
@@ -126,14 +144,14 @@ int tc_ingress_broker(struct __sk_buff *skb)
 
     // -------- Handle SUBSCRIBE --------
     if (starts_with(payload, "SUBSCRIBE ", data_end)) {
-        __u16 topic_id = 0;
-        if (parse_topic_id(payload + 10, data_end, &topic_id) < 0)
+       char topic_id[MAX_TOPIC_ID_CHARS] = {};
+        if (extract_topic_id(payload + 10, data_end, topic_id) < 0)
             return TC_ACT_OK;
 
         __u32 subscriber_ip = ip->saddr;
         __u8 dummy = 1;
 
-        void *inner_map = bpf_map_lookup_elem(&topic_subscriber_maps, &topic_id);
+        void *inner_map = bpf_map_lookup_elem(&topic_subscribe, &topic_id);
         if (!inner_map)
             return TC_ACT_OK;
 
@@ -144,11 +162,11 @@ int tc_ingress_broker(struct __sk_buff *skb)
 
     // -------- Handle PUBLISH --------
     if (starts_with(payload, "PUBLISH ", data_end)) {
-        __u16 topic_id = 0;
-        if (parse_topic_id(payload + 8, data_end, &topic_id) < 0)
+        char topic_id[MAX_TOPIC_ID_CHARS] = {};
+        if (extract_topic_id(payload + 8, data_end, topic_id) < 0)
             return TC_ACT_OK;
 
-        void *inner_map = bpf_map_lookup_elem(&topic_subscriber_maps, &topic_id);
+        void *inner_map = bpf_map_lookup_elem(&topic_subscribe, &topic_id);
         if (!inner_map)
             return TC_ACT_OK;
 

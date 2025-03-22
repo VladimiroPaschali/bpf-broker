@@ -3,7 +3,7 @@
 set -euo pipefail
 
 IFACE="enp8s0d1"
-BPF_PIN_PATH="/sys/fs/bpf/tc_ingress_logger"
+BPF_PIN_PATH="/sys/fs/bpf/tc_ingress_broker"
 
 echo "Step 1: Removing existing filters (if any)..."
 sudo tc filter del dev "$IFACE" ingress
