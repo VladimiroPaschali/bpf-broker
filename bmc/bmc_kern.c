@@ -9,7 +9,7 @@
 #include "bmc_common.h"
 
 #define MAX_TOPIC_ID 10
-#define MAX_SUBSCRIBERS 256
+#define MAX_SUBSCRIBERS 1024
 #define MAX_TOPIC_ID_CHARS 20
 
 
@@ -148,7 +148,6 @@ int tc_ingress_broker(struct __sk_buff *skb)
         };
 
         bpf_printk("PUBLISH before loop");
-        // char *context = "This string will pass to every callback call";
         long (*cb_p)(struct bpf_map *, const void *, void *, void *) = &callback_fn;
 
         bpf_for_each_map_elem(inner_map, cb_p, &ctx, 0);
