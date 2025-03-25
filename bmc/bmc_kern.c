@@ -72,6 +72,37 @@ static __inline int extract_topic_id(char *s, void *end, char *out_id) {
 static long callback_fn(struct bpf_map *map, const void *key, void *value, void *ctx_void)
 {
     struct callback_ctx *ctx = (struct callback_ctx *)ctx_void;
+    struct __sk_buff *skb = ctx->skb;
+    __u32 dest_ip = *(__u32 *)key;
+    __u32 dest_port = *(__u32 *)value;
+
+    void *data_end = (void *)(long)skb->data_end;
+    void *data = (void *)(long)skb->data;
+    struct ethhdr *eth;
+    struct iphdr *ip;
+    struct udphdr *udp;
+
+    eth = data;
+    if ((void *)eth + sizeof(*eth) > data_end)
+        return TC_ACT_OK;
+
+    if (eth->h_proto != __constant_htons(ETH_P_IP))
+        return TC_ACT_OK;
+
+    ip = (void *)eth + sizeof(*eth);
+    if ((void *)ip + sizeof(*ip) > data_end)
+        return TC_ACT_OK;
+
+    if (ip->protocol != IPPROTO_UDP)
+        return TC_ACT_OK;
+
+    udp = (void *)ip + sizeof(*ip);
+    if ((void *)udp + sizeof(*udp) > data_end)
+        return TC_ACT_OK;
+
+    ip->daddr = dest_ip;
+    udp->dest = dest_port;
+
     bpf_clone_redirect(ctx->skb, ctx->skb->ifindex, 0);
     return 0;
 }
@@ -128,7 +159,7 @@ int tc_ingress_broker(struct __sk_buff *skb)
         if (!inner_map)
             return TC_ACT_OK;
 
-        bpf_printk("PUBLISH find topic");
+        bpf_printk("PUBLISH find topic '%s'", topic_id);
 
         __u8 temp_mac[ETH_ALEN];
         __builtin_memcpy(temp_mac, eth->h_source, ETH_ALEN);

@@ -176,15 +176,45 @@ int main() {
                 }
             }
 
-            // Convert source IP
-            __u32 ip = ntohl(client.sin_addr.s_addr);
-            __u32 port = ntohs(client.sin_port);
-
             printf("REGISTER '%s' from %s\n",
                    topic_key, inet_ntoa(client.sin_addr));
 
             if (add_topic(outer_fd, topic_key) == 0) {
-                add_subscriber(outer_fd, topic_key, ip, port);
+                // Send REGACK response
+                char response[256];
+                snprintf(response, sizeof(response), "REGACK %s", topic_key);
+                if (sendto(sock, response, strlen(response), 0,
+                          (struct sockaddr *)&client, client_len) < 0) {
+                    perror("sendto");
+                }
+                // add_subscriber(outer_fd, topic_key, ip, port);
+            }
+        } else if (strncmp(buf, "SUBSCRIBE ", 10) == 0) {
+            char topic_key[MAX_TOPIC_ID_CHARS] = {0};
+            const char *topic_raw = buf + 10;
+            size_t topic_len = strnlen(topic_raw, MAX_TOPIC_ID_CHARS);
+            strncpy(topic_key, topic_raw, topic_len);
+
+            for (int i = 0; i < MAX_TOPIC_ID_CHARS; i++) {
+                if (topic_key[i] == '\n' || topic_key[i] == '\r') {
+                    topic_key[i] = '\0';
+                    break;
+                }
+            }
+
+            __u32 ip = ntohl(client.sin_addr.s_addr);
+            __u32 port = ntohs(client.sin_port);
+
+            printf("SUBSCRIBE '%s' from %s\n", 
+                   topic_key, inet_ntoa(client.sin_addr));
+
+            add_subscriber(outer_fd, topic_key, ip, port);
+
+            char response[256];
+            snprintf(response, sizeof(response), "SUBACK %s", topic_key);
+            if (sendto(sock, response, strlen(response), 0,
+                      (struct sockaddr *)&client, client_len) < 0) {
+                perror("sendto");
             }
         } else {
             printf("Unknown command: '%s'\n", buf);
