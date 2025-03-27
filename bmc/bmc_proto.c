@@ -38,7 +38,8 @@ int add_subscriber(int outer_fd, const char *topic_name, __u32 ip, __u32 port) {
     }
 
     // Insert port directly as value
-    if (bpf_map_update_elem(inner_fd, &ip, &port, BPF_ANY) < 0) {
+    __u32 port_net = htons(port);
+    if (bpf_map_update_elem(inner_fd, &ip, &port_net, BPF_ANY) < 0) {
         perror("Failed to insert subscriber into inner map");
         close(inner_fd);
         return -1;
@@ -115,15 +116,6 @@ int main() {
         perror("bpf_obj_get");
         return 1;
     }
-
-    // Add a new topic
-    add_topic(outer_fd, "test");
-
-    // Add a subscriber to that topic
-    __u32 ip = (192 << 24) | (168 << 16) | (1 << 8) | 100;
-    __u16 port = 35000;
-    add_subscriber(outer_fd, "test", ip, port);
-
 
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
