@@ -29,7 +29,7 @@ struct {
 struct subscriber_map {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 256);
-    __type(key, u32);
+    __type(key, u64);
     __type(value, u32);
 } subscriber_map SEC(".maps");
 
@@ -110,9 +110,12 @@ static long callback_fn(struct bpf_map *map, const void *key, void *value, void 
 {
     struct callback_ctx *ctx = (struct callback_ctx *)ctx_void;
     struct __sk_buff *skb = ctx->skb;
-    __u32 dest_ip = *(__u32 *)key;
-    __u32 dest_port = *(__u32 *)value;
-    __be32 dest_ip_net = htonl(dest_ip);
+    __u64 packed = *(__u64 *)key;
+
+    __u32 dest_ip = packed >> 32;
+    __u16 dest_port = (packed >> 16) & 0xFFFF;
+
+    __be32 dest_ip_net = (__be32)dest_ip;
     __be16 dest_port_net = (__be16)dest_port;
 
     void *data_end = (void *)(long)skb->data_end;

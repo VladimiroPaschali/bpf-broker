@@ -38,8 +38,9 @@ int add_subscriber(int outer_fd, const char *topic_name, __u32 ip, __u32 port) {
     }
 
     // Insert port directly as value
-    __u32 port_net = htons(port);
-    if (bpf_map_update_elem(inner_fd, &ip, &port_net, BPF_ANY) < 0) {
+    __u64 key = ((__u64)htonl(ip) << 32) | ((__u64)htons(port) << 16);
+    __u8 dummy = 1;
+    if (bpf_map_update_elem(inner_fd, &key, &dummy, BPF_ANY) < 0) {
         perror("Failed to insert subscriber into inner map");
         close(inner_fd);
         return -1;
@@ -49,7 +50,7 @@ int add_subscriber(int outer_fd, const char *topic_name, __u32 ip, __u32 port) {
     struct in_addr ip_addr = { .s_addr = htonl(ip) };
     inet_ntop(AF_INET, &ip_addr, ip_str, sizeof(ip_str));
 
-    printf("Added subscriber IP %s:%u to topic '%s'\n", ip_str, port, topic_name);
+    printf("Added subscriber %s:%u to topic '%s'\n", ip_str, port, topic_name);
     close(inner_fd);
     return 0;
 }
@@ -78,7 +79,7 @@ int add_topic(int outer_fd, const char *topic_name) {
     // Define the inner map attributes
     union bpf_attr attr = {
         .map_type = BPF_MAP_TYPE_HASH,
-        .key_size = sizeof(__u32),
+        .key_size = sizeof(__u64),
         .value_size = sizeof(__u32),
         .max_entries = 256,
     };
