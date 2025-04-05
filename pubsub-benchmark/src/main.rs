@@ -99,11 +99,13 @@ fn main() {
 
     // Step 3: Send PUBLISH messages
     let sock = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind publisher socket");
+    let interval = Duration::from_nanos(100_000); // 0.1 ms = 100,000 ns
 
     println!("[>] Sending {} messages to topic '{}'", args.msgs, args.topic);
     for i in 0..args.msgs {
         let msg = format!("PUBLISH {} msg-{}", args.topic, i);
         sock.send_to(msg.as_bytes(), broker_addr).unwrap();
+        thread::sleep(interval);
     }
 
     // Step 4: Wait until all expected messages are received
