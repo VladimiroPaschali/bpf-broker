@@ -25,6 +25,13 @@ struct {
     __uint(max_entries, BMC_PROG_TC_MAX);
 } map_progs_tc SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, u32);
+} publish_counter SEC(".maps");
+
 // Inner map: subscriber IP -> dummy (u8)
 struct subscriber_map {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -154,7 +161,7 @@ static long callback_fn(struct bpf_map *map, const void *key, void *value, void 
     if (refresh_headers(skb, &data, &data_end, &eth, &ip, &udp) < 0)
         return TC_ACT_OK;
 
-    bpf_printk_ip(ip->daddr, udp->dest, "Callback: Cloning packet to");
+    // bpf_printk_ip(ip->daddr, udp->dest, "Callback: Cloning packet to");
     bpf_clone_redirect(ctx->skb, ctx->skb->ifindex, 0);
     return 0;
 }
@@ -181,6 +188,11 @@ int tc_ingress_broker(struct __sk_buff *skb)
     char *payload = (void *)udp + sizeof(*udp);
 
     if (starts_with(payload, "PUBLISH ", data_end)) {
+        __u32 idx = 0;
+        __u32 *counter = bpf_map_lookup_elem(&publish_counter, &idx);
+        if (counter) {
+            __sync_fetch_and_add(counter, 1);
+        }
 
         char topic_id[MAX_TOPIC_ID_CHARS] = {};
         if (extract_topic_id(payload + 8, data_end, topic_id) < 0)
@@ -190,7 +202,7 @@ int tc_ingress_broker(struct __sk_buff *skb)
         if (!inner_map)
             return TC_ACT_OK;
 
-        bpf_printk("PUBLISH find topic '%s'", topic_id);
+        // bpf_printk("PUBLISH find topic '%s'", topic_id);
 
         __u8 temp_mac[ETH_ALEN];
         __builtin_memcpy(temp_mac, eth->h_source, ETH_ALEN);

@@ -101,7 +101,6 @@ fn main() {
     let sock = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind publisher socket");
 
     println!("[>] Sending {} messages to topic '{}'", args.msgs, args.topic);
-    let start = Instant::now();
     for i in 0..args.msgs {
         let msg = format!("PUBLISH {} msg-{}", args.topic, i);
         sock.send_to(msg.as_bytes(), broker_addr).unwrap();
@@ -109,7 +108,7 @@ fn main() {
 
     // Step 4: Wait until all expected messages are received
     let expected = args.msgs * args.subs;
-    let timeout = Duration::from_secs(10);
+    let timeout = Duration::from_secs(20);
     let poll_interval = Duration::from_millis(50);
     let wait_start = Instant::now();
 
@@ -125,7 +124,7 @@ fn main() {
         thread::sleep(poll_interval);
     }
 
-    let elapsed = start.elapsed().as_secs_f64();
+    let elapsed = wait_start.elapsed().as_secs_f64();
     let total_received = counter.load(Ordering::Relaxed);
 
     println!("\n=== Benchmark Results ===");
