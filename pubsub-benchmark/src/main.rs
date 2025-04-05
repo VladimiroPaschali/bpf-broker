@@ -107,8 +107,23 @@ fn main() {
         sock.send_to(msg.as_bytes(), broker_addr).unwrap();
     }
 
-    // Step 4: Wait for messages to be processed
-    thread::sleep(Duration::from_secs(2));
+    // Step 4: Wait until all expected messages are received
+    let expected = args.msgs * args.subs;
+    let timeout = Duration::from_secs(10);
+    let poll_interval = Duration::from_millis(50);
+    let wait_start = Instant::now();
+
+    loop {
+        let current = counter.load(Ordering::Relaxed);
+        if current >= expected {
+            break;
+        }
+        if wait_start.elapsed() >= timeout {
+            println!("[!] Timeout reached while waiting for messages");
+            break;
+        }
+        thread::sleep(poll_interval);
+    }
 
     let elapsed = start.elapsed().as_secs_f64();
     let total_received = counter.load(Ordering::Relaxed);
