@@ -22,15 +22,30 @@ struct {
     __uint(type, BPF_MAP_TYPE_PROG_ARRAY);
     __uint(key_size, sizeof(u32));
     __uint(value_size, sizeof(u32));
+    __uint(max_entries, BMC_PROG_XDP_MAX);
+} map_progs_xdp SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PROG_ARRAY);
+    __uint(key_size, sizeof(u32));
+    __uint(value_size, sizeof(u32));
     __uint(max_entries, BMC_PROG_TC_MAX);
 } map_progs_tc SEC(".maps");
 
+/* stat maps */
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __uint(max_entries, 1);
     __type(key, u32);
     __type(value, u32);
 } publish_counter SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, u32);
+} clone_counter SEC(".maps");
 
 // Inner map: subscriber IP -> dummy (u8)
 struct subscriber_map {
@@ -49,6 +64,69 @@ struct topic_subscriber_maps {
     __type(key, char[MAX_TOPIC_ID_CHARS]);
     __array(values, subscriber_map_t);
 } topic_subscribe SEC(".maps");
+
+struct topic_sub_cnt {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MAX_TOPIC_ID);
+    __type(key, char[MAX_TOPIC_ID_CHARS]);
+    __type(value, u32);
+} topic_sub_cnt SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MAX_TOPIC_ID);
+    __type(key, char[MAX_TOPIC_ID_CHARS]);
+    __type(value, u64);
+} topic_first_sub SEC(".maps");
+
+static inline u16 compute_ip_checksum(struct iphdr *ip)
+{
+    u32 csum = 0;
+    u16 *next_ip_u16 = (u16 *)ip;
+
+    ip->check = 0;
+
+#pragma clang loop unroll(full)
+    for (int i = 0; i < (sizeof(*ip) >> 1); i++) {
+        csum += *next_ip_u16++;
+    }
+
+	return ~((csum & 0xffff) + (csum >> 16));
+}
+
+static __always_inline int parse_udp_packet(struct xdp_md *ctx,
+                                            void **data, void **data_end,
+                                            struct ethhdr **eth,
+                                            struct iphdr **ip,
+                                            struct udphdr **udp,
+                                            char **payload) {
+    *data = (void *)(long)ctx->data;
+    *data_end = (void *)(long)ctx->data_end;
+
+    *eth = *data;
+    if ((void *)(*eth + 1) > *data_end)
+        return -1;
+
+    if ((*eth)->h_proto != __constant_htons(ETH_P_IP))
+        return -1;
+
+    *ip = (void *)(*eth + 1);
+    if ((void *)(*ip + 1) > *data_end)
+        return -1;
+
+    if ((*ip)->protocol != IPPROTO_UDP)
+        return -1;
+
+    *udp = (void *)(*ip + 1);
+    if ((void *)(*udp + 1) > *data_end)
+        return -1;
+
+    *payload = (char *)(*udp + 1);
+    if ((void *)(*payload + 1) > *data_end)
+        return -1;
+
+    return 0;
+}
 
 static __inline int starts_with(const char *p, const char *prefix, void *end) {
     int i = 0;
@@ -163,7 +241,83 @@ static long callback_fn(struct bpf_map *map, const void *key, void *value, void 
 
     // bpf_printk_ip(ip->daddr, udp->dest, "Callback: Cloning packet to");
     bpf_clone_redirect(ctx->skb, ctx->skb->ifindex, 0);
+    __u32 idx = 0;
+    __u32 *counter = bpf_map_lookup_elem(&clone_counter, &idx);
+    if (counter) {
+        __sync_fetch_and_add(counter, 1);
+    }
     return 0;
+}
+
+
+SEC("xdp")
+int xdp_broker(struct xdp_md *ctx)
+{
+    void *data, *data_end;
+    struct ethhdr *eth;
+    struct iphdr *ip;
+    struct udphdr *udp;
+    char *payload;
+
+    // Parse Ethernet, IP, UDP headers and payload
+    if (parse_udp_packet(ctx, &data, &data_end, &eth, &ip, &udp, &payload) < 0)
+        return XDP_PASS;
+
+    if (bpf_ntohs(udp->dest) != 11211)
+        return XDP_PASS;
+
+    if (!starts_with(payload, "PUBLISH ", data_end))
+        return XDP_PASS;
+
+    // Extract topic ID
+    char topic_id[MAX_TOPIC_ID_CHARS] = {};
+    if (extract_topic_id(payload + 8, data_end, topic_id) < 0)
+        return XDP_PASS;
+
+    // Lookup topic_sub_cnt and ensure it's 1
+    __u32 *sub_count = bpf_map_lookup_elem(&topic_sub_cnt, &topic_id);
+    if (!sub_count)
+        return XDP_PASS;
+    bpf_printk("XDP: topic_sub_cnt for topic '%s' is %d", topic_id, *sub_count);
+    if (*sub_count != 1)
+        return XDP_PASS;
+
+    // Lookup packed IP+port from topic_first_sub map
+    __u64 *packed_ptr = bpf_map_lookup_elem(&topic_first_sub, &topic_id);
+    if (!packed_ptr)
+        return XDP_DROP;
+
+    __u64 packed = *packed_ptr;
+    __u32 dest_ip = packed >> 32;
+    __u16 dest_port = (packed >> 16) & 0xFFFF;
+
+    // Rewrite Ethernet MAC addresses
+    __u8 temp_mac[ETH_ALEN];
+    __builtin_memcpy(temp_mac, eth->h_source, ETH_ALEN);
+    __builtin_memcpy(eth->h_source, eth->h_dest, ETH_ALEN);
+    __builtin_memcpy(eth->h_dest, temp_mac, ETH_ALEN);
+
+    // Swap and update IP addresses
+    __be32 old_saddr = ip->saddr;
+    ip->saddr = ip->daddr;
+    ip->daddr = (__be32)dest_ip;
+
+    // Recalculate IPv4 header checksum
+    ip->check = 0;
+    ip->check = compute_ip_checksum(ip);
+    bpf_printk("XDP: After IP checksum recalculation");
+
+    // Swap and update UDP ports
+    __be16 temp_port = udp->source;
+    udp->source = udp->dest;
+    udp->dest = (__be16)dest_port;
+    bpf_printk_ip(ip->daddr, udp->dest, "XDP: Cloning packet to");
+
+    // Clear UDP checksum (safe for many setups)
+    udp->check = 0;
+    bpf_printk("XDP: After UDP checksum recalculation");
+
+    return XDP_REDIRECT;
 }
 
 

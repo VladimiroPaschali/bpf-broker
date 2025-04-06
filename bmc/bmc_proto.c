@@ -16,7 +16,7 @@
 #define MAX_TOPIC_ID_CHARS 20
 
 
-int add_subscriber(int outer_fd, const char *topic_name, __u32 ip, __u32 port) {
+int add_subscriber(int outer_fd, int sub_count_fd, int first_sub_fd, const char *topic_name, __u32 ip, __u32 port) {
     char topic_key[MAX_TOPIC_ID_CHARS] = {0};
     size_t len = strlen(topic_name);
     if (len >= MAX_TOPIC_ID_CHARS) {
@@ -44,6 +44,28 @@ int add_subscriber(int outer_fd, const char *topic_name, __u32 ip, __u32 port) {
         perror("Failed to insert subscriber into inner map");
         close(inner_fd);
         return -1;
+    }
+
+    __u32 current = 0;
+    if (bpf_map_lookup_elem(sub_count_fd, topic_key, &current) == 0) {
+        current += 1;
+    } else {
+        current = 1;
+    }
+    
+    if (bpf_map_update_elem(sub_count_fd, topic_key, &current, BPF_ANY) < 0) {
+        perror("Failed to update topic_sub_cnt");
+        close(inner_fd);
+        return -1;
+    }
+    printf("Current sub count is %d for topic '%s'\n", current, topic_name);
+
+    if (current == 1) {
+        if (bpf_map_update_elem(first_sub_fd, topic_key, &key, BPF_ANY) < 0) {
+            perror("Failed to store first subscriber key");
+            close(inner_fd);
+            return -1;
+        }
     }
 
     char ip_str[INET_ADDRSTRLEN];
@@ -112,12 +134,26 @@ int add_topic(int outer_fd, const char *topic_name) {
 
 
 int main() {
+    printf("Starting BMC...\n");
     int outer_fd = bpf_obj_get("/sys/fs/bpf/topic_subscribe");
     if (outer_fd < 0) {
         perror("bpf_obj_get");
         return 1;
     }
+    printf("BMC: outer_fd = %d\n", outer_fd);
 
+    int sub_count_fd = bpf_obj_get("/sys/fs/bpf/topic_sub_cnt");
+    if (sub_count_fd < 0) {
+        perror("bpf_obj_get");
+        return 1;
+    }
+    printf("BMC: sub_count_fd = %d\n", sub_count_fd);
+    int first_sub_fd = bpf_obj_get("/sys/fs/bpf/topic_first_sub");
+    if (first_sub_fd < 0) {
+        perror("bpf_obj_get");
+        return 1;
+    }
+    printf("BMC: first_sub_fd = %d\n", first_sub_fd);
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         perror("socket");
@@ -201,7 +237,7 @@ int main() {
             printf("SUBSCRIBE '%s' from %s\n", 
                    topic_key, inet_ntoa(client.sin_addr));
 
-            add_subscriber(outer_fd, topic_key, ip, port);
+            add_subscriber(outer_fd, sub_count_fd, first_sub_fd, topic_key, ip, port);
 
             char response[256];
             snprintf(response, sizeof(response), "SUBACK %s", topic_key);
@@ -216,5 +252,7 @@ int main() {
 
     close(sock);
     close(outer_fd);
+    close(sub_count_fd);
+    close(first_sub_fd);
     return 0;
 }

@@ -29,9 +29,19 @@ struct bpf_progs_desc {
 };
 
 static struct bpf_progs_desc progs[] = {
+	{"xdp_broker", BPF_PROG_TYPE_XDP, 0, -1, NULL},
 	{"tc_ingress_broker", BPF_PROG_TYPE_SCHED_CLS, 1, -1, NULL},
 };
 
+struct bpf_map_pin_desc {
+	const char *map_name;
+};
+
+static struct bpf_map_pin_desc maps[] = {
+	{ "topic_subscribe" },
+	{ "topic_sub_cnt" },
+	{ "topic_first_sub" },
+};
 
 void list_bpf_programs(struct bpf_object *obj) {
     struct bpf_program *prog;
@@ -46,19 +56,48 @@ void list_bpf_programs(struct bpf_object *obj) {
 
 
 static int print_bpf_verifier(enum libbpf_print_level level,
-							const char *format, va_list args)
-{
+							const char *format, va_list args) {
 	return vfprintf(stdout, format, args);
 }
 
+int pin_map(struct bpf_object *obj, const char *map_name) {
+	int map_fd = bpf_object__find_map_fd_by_name(obj, map_name);
+	if (map_fd < 0) {
+		fprintf(stderr, "Error: Failed to find '%s' map\n", map_name);
+		return -1;
+	}
+
+	char pin_path[PATH_MAX];
+	snprintf(pin_path, sizeof(pin_path), "%s/%s", BPF_SYSFS_ROOT, map_name);
+
+	if (bpf_obj_pin(map_fd, pin_path) != 0) {
+		if (errno == EEXIST) {
+			fprintf(stdout, "'%s' already pinned, unpinning to replace\n", map_name);
+			if (unlink(pin_path) != 0) {
+				perror("Failed to remove existing pin");
+				return -1;
+			}
+			if (bpf_obj_pin(map_fd, pin_path) != 0) {
+				perror("Failed to re-pin map");
+				return -1;
+			}
+		} else {
+			perror("Failed to pin map");
+			return -1;
+		}
+	}
+	return 0;
+}
 
 int main(int argc, char *argv[])
 {
 	struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY};
-	int map_progs_tc_fd, map_progs_fd;
+	int map_progs_xdp_fd, xdp_main_prog_fd, map_progs_tc_fd, map_progs_fd;
 	struct bpf_object *obj;
 	char filename[PATH_MAX];
+	// char mapname[PATH_MAX];
 	int err, prog_count;
+	__u32 xdp_flags = 0;
 	int *interfaces_idx;
 	int ret = 0;
 
@@ -83,6 +122,7 @@ int main(int argc, char *argv[])
         }
     }
 
+	xdp_flags |= XDP_FLAGS_DRV_MODE;
 	nr_cpus = libbpf_num_possible_cpus();
 
 	snprintf(filename, sizeof(filename), "%s_kern.o", argv[0]);
@@ -124,6 +164,12 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	map_progs_xdp_fd = bpf_object__find_map_fd_by_name(obj, "map_progs_xdp");
+	if (map_progs_xdp_fd < 0) {
+		fprintf(stderr, "Error: bpf_object__find_map_fd_by_name failed\n");
+		return 1;
+	}
+
 	map_progs_tc_fd = bpf_object__find_map_fd_by_name(obj, "map_progs_tc");
 	if (map_progs_tc_fd < 0) {
 		fprintf(stderr, "Error: bpf_object__find_map_fd_by_name failed\n");
@@ -148,6 +194,9 @@ int main(int argc, char *argv[])
 			}
 
 			switch (progs[i].type) {
+			case BPF_PROG_TYPE_XDP:
+				map_progs_fd = map_progs_xdp_fd;
+				break;
 			case BPF_PROG_TYPE_SCHED_CLS:
 				map_progs_fd = map_progs_tc_fd;
 				break;
@@ -188,30 +237,25 @@ retry:
 		}
 	}
 
-	// Pin topic_subscribe map for use in userspace 
-	struct bpf_map *map;
-	bpf_object__for_each_map(map, obj) {
-		const char *map_name = bpf_map__name(map);
-		if (strcmp(map_name, "topic_subscribe") == 0) {
-			char path[PATH_MAX];
-			snprintf(path, sizeof(path), "%s/%s", BPF_SYSFS_ROOT, map_name);
-		retry_pin:
-			if (bpf_map__pin(map, path)) {
-				if (errno == EEXIST) {
-					printf("Map already pinned at %s, unpinning and retrying...\n", path);
-					if (bpf_map__unpin(map, path)) {
-						fprintf(stderr, "Failed to unpin existing map %s\n", path);
-						exit(EXIT_FAILURE);
-					}
-					goto retry_pin;
-				} else {
-					fprintf(stderr, "Failed to pin map %s: %s\n", path, strerror(errno));
-					exit(EXIT_FAILURE);
-				}
-			} else {
-				printf("Successfully pinned map '%s' at %s\n", map_name, path);
-			}
+	xdp_main_prog_fd = bpf_program__fd(progs[0].prog);
+	if (xdp_main_prog_fd < 0) {
+		fprintf(stderr, "Error: bpf_program__fd failed\n");
+		return 1;
+	}
+
+	for (int i = 0; i < interface_count; i++) {
+		if (bpf_xdp_attach(interfaces_idx[i], xdp_main_prog_fd, xdp_flags, NULL) < 0) {
+			fprintf(stderr, "Error: bpf_xdp_attach failed for interface %d\n", interfaces_idx[i]);
+			return 1;
+		} else {
+			printf("Main BPF program attached to XDP on interface %d\n", interfaces_idx[i]);
 		}
+	}
+
+	int map_count = sizeof(maps) / sizeof(maps[0]);
+	for (int i = 0; i < map_count; i++) {
+		if (pin_map(obj, maps[i].map_name) < 0)
+			return -1;
 	}
 
 	int sig, quit = 0;
@@ -239,6 +283,10 @@ retry:
 				fprintf(stderr, "Unknown signal\n");
 				break;
 		}
+	}
+
+	for (int i = 0; i < interface_count; i++) {
+		bpf_xdp_attach(interfaces_idx[i], -1, xdp_flags, NULL);
 	}
 
 	return ret;
