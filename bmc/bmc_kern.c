@@ -365,7 +365,7 @@ int xdp_broker(struct xdp_md *ctx)
     udp->check = compute_udp_checksum(ip, udp, udp + 1, data_end);
     bpf_printk_ip(ip->daddr, udp->dest, "XDP: Redirecting packet to");
 
-    return bpf_redirect(ctx->ingress_ifindex /* enp8s0d1 */, 0);
+    return XDP_TX;
 }
 
 
