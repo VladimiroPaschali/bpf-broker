@@ -79,19 +79,77 @@ struct {
     __type(value, u64);
 } topic_first_sub SEC(".maps");
 
-static inline u16 compute_ip_checksum(struct iphdr *ip)
+static __always_inline __u16 compute_ip_checksum(struct iphdr *ip)
 {
-    u32 csum = 0;
-    u16 *next_ip_u16 = (u16 *)ip;
+    __u32 csum = 0;
+    __u16 *ptr = (__u16 *)ip;
 
-    ip->check = 0;
-
-#pragma clang loop unroll(full)
-    for (int i = 0; i < (sizeof(*ip) >> 1); i++) {
-        csum += *next_ip_u16++;
+#pragma clang loop unroll(disable)
+    for (int i = 0; i < (sizeof(struct iphdr) >> 1); i++) {
+        __u16 word = *ptr++;
+        csum += word;
+        bpf_printk("IP csum += word[%d] = 0x%x, running total = 0x%x", i, word, csum);
     }
 
-	return ~((csum & 0xffff) + (csum >> 16));
+    csum = (csum & 0xffff) + (csum >> 16);
+    csum = (csum & 0xffff) + (csum >> 16);
+
+    __u16 result = ~csum;
+    bpf_printk("Final IP checksum = 0x%x", result);
+    return result;
+}
+
+static __always_inline __u16 compute_udp_checksum(struct iphdr *ip, struct udphdr *udp, void *payload_start, void *data_end)
+{
+    __u32 csum = 0;
+    __u32 udp_len = bpf_ntohs(udp->len);
+
+    bpf_printk("UDP Checksum: udp_len = %u", udp_len);
+    bpf_printk("Pseudo-header: saddr=%x daddr=%x proto=%x", bpf_ntohl(ip->saddr), bpf_ntohl(ip->daddr), IPPROTO_UDP);
+
+    // Pseudo-header
+    csum += (__u16)(ip->saddr >> 16);
+    csum += (__u16)(ip->saddr & 0xFFFF);
+    csum += (__u16)(ip->daddr >> 16);
+    csum += (__u16)(ip->daddr & 0xFFFF);
+    csum += bpf_htons(IPPROTO_UDP);
+    csum += udp->len;
+
+    bpf_printk("Pseudo-header csum = 0x%x", csum);
+
+    __u16 *ptr = (__u16 *)udp;
+
+#pragma unroll
+    for (int i = 0; i < 128; i++) { // Up to 256 bytes
+        if ((void *)(ptr + 1) > data_end || (i << 1) >= udp_len)
+            break;
+
+        __u16 word = 0;
+        bpf_probe_read_kernel(&word, sizeof(word), ptr);
+        csum += word;
+
+        bpf_printk("csum += word[%d] = 0x%x, running total = 0x%x", i, word, csum);
+
+        ptr++;
+    }
+
+    // If length is odd, pad the last byte
+    if (udp_len & 1) {
+        if ((void *)ptr < data_end) {
+            __u8 last_byte = 0;
+            bpf_probe_read_kernel(&last_byte, sizeof(last_byte), ptr);
+            csum += (__u16)last_byte << 8;
+            bpf_printk("Odd length: last_byte = 0x%x padded = 0x%x", last_byte, (__u16)last_byte << 8);
+        }
+    }
+
+    // Fold to 16 bits
+    csum = (csum & 0xFFFF) + (csum >> 16);
+    csum = (csum & 0xFFFF) + (csum >> 16);
+
+    __u16 final = ~csum;
+    bpf_printk("Final UDP checksum = 0x%x", final);
+    return final;
 }
 
 static __always_inline int parse_udp_packet(struct xdp_md *ctx,
@@ -259,7 +317,6 @@ int xdp_broker(struct xdp_md *ctx)
     struct udphdr *udp;
     char *payload;
 
-    // Parse Ethernet, IP, UDP headers and payload
     if (parse_udp_packet(ctx, &data, &data_end, &eth, &ip, &udp, &payload) < 0)
         return XDP_PASS;
 
@@ -269,20 +326,14 @@ int xdp_broker(struct xdp_md *ctx)
     if (!starts_with(payload, "PUBLISH ", data_end))
         return XDP_PASS;
 
-    // Extract topic ID
     char topic_id[MAX_TOPIC_ID_CHARS] = {};
     if (extract_topic_id(payload + 8, data_end, topic_id) < 0)
         return XDP_PASS;
 
-    // Lookup topic_sub_cnt and ensure it's 1
     __u32 *sub_count = bpf_map_lookup_elem(&topic_sub_cnt, &topic_id);
-    if (!sub_count)
-        return XDP_PASS;
-    bpf_printk("XDP: topic_sub_cnt for topic '%s' is %d", topic_id, *sub_count);
-    if (*sub_count != 1)
+    if (!sub_count || *sub_count != 1)
         return XDP_PASS;
 
-    // Lookup packed IP+port from topic_first_sub map
     __u64 *packed_ptr = bpf_map_lookup_elem(&topic_first_sub, &topic_id);
     if (!packed_ptr)
         return XDP_DROP;
@@ -291,33 +342,30 @@ int xdp_broker(struct xdp_md *ctx)
     __u32 dest_ip = packed >> 32;
     __u16 dest_port = (packed >> 16) & 0xFFFF;
 
+    __be32 dest_ip_net = (__be32)dest_ip;
+    __be16 dest_port_net = (__be16)dest_port;
+
     // Rewrite Ethernet MAC addresses
     __u8 temp_mac[ETH_ALEN];
     __builtin_memcpy(temp_mac, eth->h_source, ETH_ALEN);
     __builtin_memcpy(eth->h_source, eth->h_dest, ETH_ALEN);
     __builtin_memcpy(eth->h_dest, temp_mac, ETH_ALEN);
 
-    // Swap and update IP addresses
-    __be32 old_saddr = ip->saddr;
+    // Swap IP addresses
     ip->saddr = ip->daddr;
-    ip->daddr = (__be32)dest_ip;
-
-    // Recalculate IPv4 header checksum
+    ip->daddr = dest_ip_net;
     ip->check = 0;
     ip->check = compute_ip_checksum(ip);
-    bpf_printk("XDP: After IP checksum recalculation");
+    bpf_printk("XDP: Recomputed IP checksum");
 
-    // Swap and update UDP ports
-    __be16 temp_port = udp->source;
+    // Swap UDP ports
     udp->source = udp->dest;
-    udp->dest = (__be16)dest_port;
-    bpf_printk_ip(ip->daddr, udp->dest, "XDP: Cloning packet to");
-
-    // Clear UDP checksum (safe for many setups)
+    udp->dest = dest_port_net;
     udp->check = 0;
-    bpf_printk("XDP: After UDP checksum recalculation");
+    udp->check = compute_udp_checksum(ip, udp, udp + 1, data_end);
+    bpf_printk_ip(ip->daddr, udp->dest, "XDP: Redirecting packet to");
 
-    return XDP_REDIRECT;
+    return bpf_redirect(ctx->ingress_ifindex /* enp8s0d1 */, 0);
 }
 
 

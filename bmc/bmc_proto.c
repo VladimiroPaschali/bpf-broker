@@ -39,6 +39,13 @@ int add_subscriber(int outer_fd, int sub_count_fd, int first_sub_fd, const char 
 
     // Insert port directly as value
     __u64 key = ((__u64)htonl(ip) << 32) | ((__u64)htons(port) << 16);
+    // __u8 existing;
+    // if (bpf_map_lookup_elem(inner_fd, &key, &existing) != 0) {
+    //     printf("Subscriber %u:%u already exists in for topic '%s'\n", ip, port, topic_name);
+    //     close(inner_fd);
+    //     return 0;
+    // }
+
     __u8 dummy = 1;
     if (bpf_map_update_elem(inner_fd, &key, &dummy, BPF_ANY) < 0) {
         perror("Failed to insert subscriber into inner map");
