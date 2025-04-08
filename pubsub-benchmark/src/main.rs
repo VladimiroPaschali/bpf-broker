@@ -68,7 +68,7 @@ fn spawn_subscriber(topic: String, id: usize, broker: SocketAddr) {
 }
 
 /// Each publisher thread sends messages to the broker at a constant rate
-fn spawn_client_thread(
+fn spawn_publisher_thread(
     id: usize,
     rate: u64,
     duration: Duration,
@@ -92,7 +92,7 @@ fn spawn_client_thread(
             thread::sleep(interval);
         }
 
-        println!("[client {:03}] sent {} messages", id, local_count);
+        println!("[publisher {:03}] sent {} messages", id, local_count);
     });
 }
 
@@ -158,7 +158,7 @@ fn main() {
 
     // Step 4: Launch publishers
     for id in 0..args.pubs {
-        spawn_client_thread(
+        spawn_publisher_thread(
             id,
             per_publisher_rate,
             duration,
