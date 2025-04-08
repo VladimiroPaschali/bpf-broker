@@ -89,14 +89,12 @@ static __always_inline __u16 compute_ip_checksum(struct iphdr *ip)
     for (int i = 0; i < (sizeof(struct iphdr) >> 1); i++) {
         __u16 word = *ptr++;
         csum += word;
-        bpf_printk("IP csum += word[%d] = 0x%x, running total = 0x%x", i, word, csum);
     }
 
     csum = (csum & 0xffff) + (csum >> 16);
     csum = (csum & 0xffff) + (csum >> 16);
 
     __u16 result = ~csum;
-    bpf_printk("Final IP checksum = 0x%x", result);
     return result;
 }
 
@@ -105,9 +103,6 @@ static __always_inline __u16 compute_udp_checksum(struct iphdr *ip, struct udphd
     __u32 csum = 0;
     __u32 udp_len = bpf_ntohs(udp->len);
 
-    bpf_printk("UDP Checksum: udp_len = %u", udp_len);
-    bpf_printk("Pseudo-header: saddr=%x daddr=%x proto=%x", bpf_ntohl(ip->saddr), bpf_ntohl(ip->daddr), IPPROTO_UDP);
-
     // Pseudo-header
     csum += (__u16)(ip->saddr >> 16);
     csum += (__u16)(ip->saddr & 0xFFFF);
@@ -115,8 +110,6 @@ static __always_inline __u16 compute_udp_checksum(struct iphdr *ip, struct udphd
     csum += (__u16)(ip->daddr & 0xFFFF);
     csum += bpf_htons(IPPROTO_UDP);
     csum += udp->len;
-
-    bpf_printk("Pseudo-header csum = 0x%x", csum);
 
     __u16 *ptr = (__u16 *)udp;
 
@@ -129,8 +122,6 @@ static __always_inline __u16 compute_udp_checksum(struct iphdr *ip, struct udphd
         bpf_probe_read_kernel(&word, sizeof(word), ptr);
         csum += word;
 
-        bpf_printk("csum += word[%d] = 0x%x, running total = 0x%x", i, word, csum);
-
         ptr++;
     }
 
@@ -140,7 +131,6 @@ static __always_inline __u16 compute_udp_checksum(struct iphdr *ip, struct udphd
             __u8 last_byte = 0;
             bpf_probe_read_kernel(&last_byte, sizeof(last_byte), ptr);
             csum += (__u16)last_byte << 8;
-            bpf_printk("Odd length: last_byte = 0x%x padded = 0x%x", last_byte, (__u16)last_byte << 8);
         }
     }
 
@@ -149,7 +139,6 @@ static __always_inline __u16 compute_udp_checksum(struct iphdr *ip, struct udphd
     csum = (csum & 0xFFFF) + (csum >> 16);
 
     __u16 final = ~csum;
-    bpf_printk("Final UDP checksum = 0x%x", final);
     return final;
 }
 
@@ -318,6 +307,9 @@ int xdp_broker(struct xdp_md *ctx)
     struct udphdr *udp;
     char *payload;
 
+    // if (true)
+    //     return XDP_PASS;
+
     if (parse_udp_packet(ctx, &data, &data_end, &eth, &ip, &udp, &payload) < 0)
         return XDP_PASS;
 
@@ -326,6 +318,12 @@ int xdp_broker(struct xdp_md *ctx)
 
     if (!starts_with(payload, "PUBLISH ", data_end))
         return XDP_PASS;
+
+    __u32 idx = 0;
+    __u32 *p_counter = bpf_map_lookup_elem(&publish_counter, &idx);
+    if (p_counter) {
+        __sync_fetch_and_add(p_counter, 1);
+    }
 
     char topic_id[MAX_TOPIC_ID_CHARS] = {};
     if (extract_topic_id(payload + 8, data_end, topic_id) < 0)
@@ -357,14 +355,17 @@ int xdp_broker(struct xdp_md *ctx)
     ip->daddr = dest_ip_net;
     ip->check = 0;
     ip->check = compute_ip_checksum(ip);
-    bpf_printk("XDP: Recomputed IP checksum");
 
     // Swap UDP ports
     udp->source = udp->dest;
     udp->dest = dest_port_net;
     udp->check = 0;
     udp->check = compute_udp_checksum(ip, udp, udp + 1, data_end);
-    bpf_printk_ip(ip->daddr, udp->dest, "XDP: Redirecting packet to");
+
+    __u32 *c_counter = bpf_map_lookup_elem(&clone_counter, &idx);
+    if (c_counter) {
+        __sync_fetch_and_add(c_counter, 1);
+    }
 
     return XDP_TX;
 }
