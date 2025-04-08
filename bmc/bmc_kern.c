@@ -58,7 +58,7 @@ struct subscriber_map {
 typedef struct subscriber_map subscriber_map_t;
 
 // Outer map: topic ID -> inner map of subscribers
-struct topic_subscriber_maps {
+struct topic_subscribe {
     __uint(type, BPF_MAP_TYPE_HASH_OF_MAPS);
     __uint(max_entries, MAX_TOPIC_ID);
     __type(key, char[MAX_TOPIC_ID_CHARS]);
