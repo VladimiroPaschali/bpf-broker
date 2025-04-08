@@ -9,7 +9,7 @@
 #include "bmc_common.h"
 
 #define MAX_TOPIC_ID 10
-#define MAX_SUBSCRIBERS 1024
+#define MAX_SUBSCRIBERS 2048
 #define MAX_TOPIC_ID_CHARS 20
 
 
@@ -62,6 +62,7 @@ struct topic_subscriber_maps {
     __uint(type, BPF_MAP_TYPE_HASH_OF_MAPS);
     __uint(max_entries, MAX_TOPIC_ID);
     __type(key, char[MAX_TOPIC_ID_CHARS]);
+    __type(value, u32);
     __array(values, subscriber_map_t);
 } topic_subscribe SEC(".maps");
 

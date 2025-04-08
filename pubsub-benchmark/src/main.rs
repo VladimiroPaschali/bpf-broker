@@ -50,7 +50,7 @@ fn register_topic(topic: &str, broker: SocketAddr) {
 /// Start a subscriber that sends SUBSCRIBE <topic> and listens (optional for full flow)
 fn spawn_subscriber(topic: String, id: usize, broker: SocketAddr) {
     thread::spawn(move || {
-        let port = 20000 + id as u16;
+        let port = (15000 + id) as u16;
         let sock = UdpSocket::bind(("0.0.0.0", port)).expect("Failed to bind subscriber socket");
         let sub_msg = format!("SUBSCRIBE {}", topic);
         let _ = sock.send_to(sub_msg.as_bytes(), broker);
