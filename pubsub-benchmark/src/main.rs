@@ -16,8 +16,10 @@ struct Args {
     broker_ip: String,
     #[arg(long, default_value_t = 11211)]
     broker_port: u16,
-    #[arg(long, default_value_t = 340)]
-    clients: usize,
+    #[arg(long, default_value_t = 256)]
+    pubs: usize,
+    #[arg(long, default_value_t = 512)]
+    subs: usize,
     #[arg(long, default_value_t = 10)]
     duration: u64, // seconds
     #[arg(long, default_value_t = 10_000)]
@@ -102,19 +104,19 @@ fn main() {
         .expect("Invalid broker address");
 
     println!(
-        "[*] Starting {} clients targeting {} for {}s at {} msg/sec (total)",
-        args.clients, broker_addr, args.duration, args.rate
+        "[*] Starting {} publishers and {} subscribers targeting {} for {}s at {} msg/sec (total)",
+        args.pubs, args.subs, broker_addr, args.duration, args.rate
     );
 
     let global_counter = Arc::new(AtomicUsize::new(0));
-    let per_client_rate = args.rate / args.clients as u64;
+    let per_publisher_rate = args.rate / args.pubs as u64;
     let duration = Duration::from_secs(args.duration);
 
     // Step 1: Register the topic once
     register_topic(&args.topic, broker_addr);
 
     // Step 2: Start subscriber threads (optional, for full flow testing)
-    for id in 0..args.clients {
+    for id in 0..args.subs {
         spawn_subscriber(args.topic.clone(), id, broker_addr);
     }
 
@@ -154,11 +156,11 @@ fn main() {
         });
     }
 
-    // Step 4: Launch client publishers
-    for id in 0..args.clients {
+    // Step 4: Launch publishers
+    for id in 0..args.pubs {
         spawn_client_thread(
             id,
-            per_client_rate,
+            per_publisher_rate,
             duration,
             args.topic.clone(),
             broker_addr,

@@ -50,7 +50,7 @@ struct {
 // Inner map: subscriber IP -> dummy (u8)
 struct subscriber_map {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 256);
+    __uint(max_entries, MAX_SUBSCRIBERS);
     __type(key, u64);
     __type(value, u32);
 } subscriber_map SEC(".maps");
