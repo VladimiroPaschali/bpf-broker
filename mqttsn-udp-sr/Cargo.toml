@@ -1,0 +1,9 @@
+[package]
+name = "mqttsn-udp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dashmap = "5.5"
+socket2 = { version = "0.5", features = ["all"] }
+affinity = "0.1.2"
