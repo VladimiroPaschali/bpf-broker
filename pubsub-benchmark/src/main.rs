@@ -6,6 +6,7 @@ use std::sync::{
 };
 use std::thread;
 use std::time::{Duration, Instant};
+use rand::distributions::{Distribution, Uniform};
 
 #[derive(Parser, Debug)]
 #[command(name = "UDP Benchmark Client", about = "Simulates many publishers sending to a broker")]
@@ -24,6 +25,8 @@ struct Args {
     duration: u64, // seconds
     #[arg(long, default_value_t = 10_000)]
     rate: u64, // total messages per second
+    #[arg(long, default_value_t = 64)]
+    size: usize, // message size in bytes
 }
 
 /// Send a UDP "REGISTER <topic>" message to the broker and wait for optional response
@@ -75,6 +78,7 @@ fn spawn_publisher_thread(
     topic: String,
     broker: SocketAddr,
     global_counter: Arc<AtomicUsize>,
+    msg_size: usize,
 ) {
     thread::spawn(move || {
         let sock = UdpSocket::bind(("0.0.0.0", 30000 + id as u16))
@@ -84,8 +88,31 @@ fn spawn_publisher_thread(
         let start = Instant::now();
         let mut local_count = 0;
 
+        // Calculate prefix length to ensure total message size is exactly msg_size
+        let prefix = format!("PUBLISH {} ", topic);
+        let prefix_len = prefix.len();
+        
+        // Adjust payload size to account for prefix
+        let payload_size = if msg_size > prefix_len {
+            msg_size - prefix_len
+        } else {
+            println!("[Warning] Requested message size {} is too small for prefix length {}. Using minimum size.", msg_size, prefix_len);
+            1  // Minimum 1 character payload
+        };
+
+        // Pre-generate random payload of adjusted size
+        let mut rng = rand::thread_rng();
+        let char_range = Uniform::new(33, 127);
+        let random_payload: String = (0..payload_size)
+            .map(|_| char::from_u32(char_range.sample(&mut rng)).unwrap())
+            .collect();
+
         while start.elapsed() < duration {
-            let msg = format!("PUBLISH {} client{}-{}", topic, id, local_count);
+            // Verify total message size
+            let msg = format!("{}{}", prefix, random_payload);
+            assert_eq!(msg.len(), msg_size.max(prefix_len + 1), 
+                    "Message size mismatch: got {}, expected {}", 
+                    msg.len(), msg_size);
             let _ = sock.send_to(msg.as_bytes(), broker);
             local_count += 1;
             global_counter.fetch_add(1, Ordering::Relaxed);
@@ -104,8 +131,8 @@ fn main() {
         .expect("Invalid broker address");
 
     println!(
-        "[*] Starting {} publishers and {} subscribers targeting {} for {}s at {} msg/sec (total)",
-        args.pubs, args.subs, broker_addr, args.duration, args.rate
+        "[*] Starting {} publishers and {} subscribers targeting {} for {}s at {} msg/sec (total), msg_size: {}B",
+        args.pubs, args.subs, broker_addr, args.duration, args.rate, args.size
     );
 
     let global_counter = Arc::new(AtomicUsize::new(0));
@@ -165,6 +192,7 @@ fn main() {
             args.topic.clone(),
             broker_addr,
             global_counter.clone(),
+            args.size,
         );
     }
 
