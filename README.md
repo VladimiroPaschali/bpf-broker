@@ -46,3 +46,19 @@ $ chmod +x ./setup-bpf-headers.sh
 $ ./setup-bpf-headers.sh
 $ make
 ```
+
+## Run 
+
+```bash
+# terminal 1 for BPF-enabled publish path
+$ cd bmc
+$ sudo ./bmc <interface_idx>
+
+# terminal 2 for BPF-enabled register & subscribe path
+$ cd bmc
+$ sudo ./bmc_proto
+
+# terminal 3 for TC hook and log monitoring
+$ cd script
+$ sudo ./load_tc_ingress_logger.sh
+```

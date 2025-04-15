@@ -36,7 +36,9 @@ CFLAGS := -g -O2 -Wall
 CFLAGS += -I.
 CFLAGS += -I$(LINUX_LIB_PATH)
 # CFLAGS += -I$(LINUX_TOOLS_PATH)/include/uapi
-EXTRA_CFLAGS_TMP := -I/usr/include -I/usr/include/bpf -I$(LINUX_TOOLS_PATH)/include
+EXTRA_CFLAGS_TMP := -I$(LINUX_TOOLS_PATH)/include \
+                    -I$(LINUX_LIB_PATH)/bpf \
+                    -I$(LINUX_PATH)/include
 
 LDFLAGS ?= -L$(LIBBPF_PATH) -l:libbpf.a -lelf -lz
 
