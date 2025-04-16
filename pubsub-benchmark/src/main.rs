@@ -119,7 +119,7 @@ fn spawn_publisher_thread(
             thread::sleep(interval);
         }
 
-        println!("[publisher {:03}] sent {} messages", id, local_count);
+        // println!("[publisher {:03}] sent {} messages", id, local_count);
     });
 }
 
@@ -168,7 +168,7 @@ fn main() {
                 last = total;
 
                 // Assume 64-byte messages
-                let bits = (delta * size * 8) as f64;
+                let bits = (delta * args.size * 8) as f64;
                 let mbits = bits / 1_000_000.0;
 
                 println!(
