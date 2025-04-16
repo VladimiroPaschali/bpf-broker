@@ -168,7 +168,7 @@ fn main() {
                 last = total;
 
                 // Assume 64-byte messages
-                let bits = (delta * 64 * 8) as f64;
+                let bits = (delta * size * 8) as f64;
                 let mbits = bits / 1_000_000.0;
 
                 println!(
