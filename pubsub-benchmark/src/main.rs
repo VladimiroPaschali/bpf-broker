@@ -17,11 +17,11 @@ struct Args {
     broker_ip: String,
     #[arg(long, default_value_t = 11211)]
     broker_port: u16,
-    #[arg(long, default_value_t = 128)]
+    #[arg(long, default_value_t = 256)]
     pubs: usize,
     #[arg(long, default_value_t = 256)]
     subs: usize,
-    #[arg(long, default_value_t = 60)]
+    #[arg(long, default_value_t = 30)]
     duration: u64, // seconds
     #[arg(long, default_value_t = 12000000)]
     rate: u64, // total messages per second
