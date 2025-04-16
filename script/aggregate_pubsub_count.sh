@@ -18,6 +18,6 @@ done
 # Sum all values from both counters
 total_publish=$(awk '{sum += $1} END {print sum}' ../stats/publish_counter.csv)
 
-qps=$(echo "scale=2; $total_publish / 60" | bc)
+qps=$(echo "scale=2; $total_publish / 30" | bc)
 
-echo "Average QPS over 60s (publish): $qps"
+echo "Average QPS over 30s (publish): $qps"
