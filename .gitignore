@@ -57,3 +57,6 @@ linux-*.tar.sign
 
 # MQTT-UDP
 */target
+
+# stats
+stats/*

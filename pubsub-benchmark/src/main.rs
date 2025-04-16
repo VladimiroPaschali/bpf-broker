@@ -58,15 +58,15 @@ fn spawn_subscriber(topic: String, id: usize, broker: SocketAddr) {
         let sub_msg = format!("SUBSCRIBE {}", topic);
         let _ = sock.send_to(sub_msg.as_bytes(), broker);
 
-        let mut buf = [0u8; 4096];
-        loop {
-            match sock.recv_from(&mut buf) {
-                Ok((_len, _)) => {
-                    // Optionally log received message
-                }
-                Err(_) => break,
-            }
-        }
+        // let mut buf = [0u8; 4096];
+        // loop {
+        //     match sock.recv_from(&mut buf) {
+        //         Ok((_len, _)) => {
+        //             // Optionally log received message
+        //         }
+        //         Err(_) => break,
+        //     }
+        // }
     });
 }
 

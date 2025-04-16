@@ -307,8 +307,8 @@ int xdp_broker(struct xdp_md *ctx)
     struct udphdr *udp;
     char *payload;
 
-    // if (true)
-    //     return XDP_PASS;
+    if (true)
+        return XDP_PASS;
 
     if (parse_udp_packet(ctx, &data, &data_end, &eth, &ip, &udp, &payload) < 0)
         return XDP_PASS;

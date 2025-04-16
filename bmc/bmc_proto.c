@@ -213,17 +213,17 @@ int main() {
         return 1;
     }
 
-    int publish_counter_fd = bpf_obj_get("/sys/fs/bpf/publish_counter");
-    if (publish_counter_fd < 0) {
-        perror("bpf_obj_get (publish_counter)");
-        return 1;
-    }
+    // int publish_counter_fd = bpf_obj_get("/sys/fs/bpf/publish_counter");
+    // if (publish_counter_fd < 0) {
+    //     perror("bpf_obj_get (publish_counter)");
+    //     return 1;
+    // }
 
-    pthread_t rps_thread;
-    if (pthread_create(&rps_thread, NULL, poll_rps_loop, &publish_counter_fd) != 0) {
-        perror("pthread_create");
-        return 1;
-    }
+    // pthread_t rps_thread;
+    // if (pthread_create(&rps_thread, NULL, poll_rps_loop, &publish_counter_fd) != 0) {
+    //     perror("pthread_create");
+    //     return 1;
+    // }
 
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
