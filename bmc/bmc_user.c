@@ -41,6 +41,7 @@ static struct bpf_map_pin_desc maps[] = {
 	{ "topic_subscribe" },
 	{ "topic_sub_cnt" },
 	{ "topic_first_sub" },
+	{ "publish_counter" },
 };
 
 void list_bpf_programs(struct bpf_object *obj) {

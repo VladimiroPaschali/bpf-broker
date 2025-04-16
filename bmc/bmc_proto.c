@@ -13,7 +13,53 @@
 #include <sys/socket.h>   // for socket
 #include <fcntl.h>        // for fcntl()
 
+#include <pthread.h>
+#include <time.h>
+
+
 #define MAX_TOPIC_ID_CHARS 20
+#define MAX_CPUS 128
+
+
+void *poll_rps_loop(void *arg) {
+    int map_fd = *(int *)arg;
+    __u32 key = 0;
+
+    __u32 curr_values[MAX_CPUS] = {0};
+    __u32 prev_values[MAX_CPUS] = {0};
+
+    FILE *log = fopen("qps_log.txt", "a");
+    if (!log) {
+        perror("fopen");
+        return NULL;
+    }
+
+    while (1) {
+        sleep(1);
+
+        if (bpf_map_lookup_elem(map_fd, &key, curr_values) != 0) {
+            perror("bpf_map_lookup_elem");
+            continue;
+        }
+
+        __u32 total = 0;
+        for (int i = 0; i < MAX_CPUS; i++) {
+            if (curr_values[i] > prev_values[i]) {
+                total += (curr_values[i] - prev_values[i]);
+            }
+        }
+
+        // printf("[QPS] %u requests/second\n", total);
+        fprintf(log, "%u\n", total);   // log format: <QPS>
+        fflush(log);
+
+        // Save current snapshot for next delta comparison
+        memcpy(prev_values, curr_values, sizeof(curr_values));
+    }
+
+    fclose(log);
+    return NULL;
+}
 
 
 int add_subscriber(int outer_fd, int sub_count_fd, int first_sub_fd, const char *topic_name, __u32 ip, __u32 port) {
@@ -164,6 +210,18 @@ int main() {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         perror("socket");
+        return 1;
+    }
+
+    int publish_counter_fd = bpf_obj_get("/sys/fs/bpf/publish_counter");
+    if (publish_counter_fd < 0) {
+        perror("bpf_obj_get (publish_counter)");
+        return 1;
+    }
+
+    pthread_t rps_thread;
+    if (pthread_create(&rps_thread, NULL, poll_rps_loop, &publish_counter_fd) != 0) {
+        perror("pthread_create");
         return 1;
     }
 
