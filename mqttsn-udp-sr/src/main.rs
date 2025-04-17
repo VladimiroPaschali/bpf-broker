@@ -68,8 +68,8 @@ fn main() -> std::io::Result<()> {
         let pub_total = publish_counter.load(Ordering::Relaxed);
         let clone_total = clone_counter.load(Ordering::Relaxed);
         println!(
-            "[stats] Received PUBLISH: {}, Cloned to subscribers: {}",
-            pub_total, clone_total
+            "[stats] Received PUBLISH: {}, Cloned to subscribers: {}, QPS: {}",
+            pub_total, clone_total, pub_total / 30
         );
         
         // println!("\nPer-core message distribution:");

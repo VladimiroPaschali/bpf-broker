@@ -57,16 +57,6 @@ fn spawn_subscriber(topic: String, id: usize, broker: SocketAddr) {
         let sock = UdpSocket::bind(("0.0.0.0", port)).expect("Failed to bind subscriber socket");
         let sub_msg = format!("SUBSCRIBE {}", topic);
         let _ = sock.send_to(sub_msg.as_bytes(), broker);
-
-        // let mut buf = [0u8; 4096];
-        // loop {
-        //     match sock.recv_from(&mut buf) {
-        //         Ok((_len, _)) => {
-        //             // Optionally log received message
-        //         }
-        //         Err(_) => break,
-        //     }
-        // }
     });
 }
 
@@ -84,11 +74,8 @@ fn spawn_publisher_thread(
         let sock = UdpSocket::bind(("0.0.0.0", 30000 + id as u16))
             .expect("Failed to bind UDP socket");
 
-        let interval = Duration::from_nanos(1_000_000_000 / rate);
         let start = Instant::now();
-        let mut local_count = 0;
 
-        // Calculate prefix length to ensure total message size is exactly msg_size
         let prefix = format!("PUBLISH {} ", topic);
         let prefix_len = prefix.len();
         
@@ -100,26 +87,29 @@ fn spawn_publisher_thread(
             1  // Minimum 1 character payload
         };
 
-        // Pre-generate random payload of adjusted size
         let mut rng = rand::thread_rng();
         let char_range = Uniform::new(33, 127);
-        let random_payload: String = (0..payload_size)
-            .map(|_| char::from_u32(char_range.sample(&mut rng)).unwrap())
-            .collect();
-
+        
         while start.elapsed() < duration {
-            // Verify total message size
-            let msg = format!("{}{}", prefix, random_payload);
-            assert_eq!(msg.len(), msg_size.max(prefix_len + 1), 
-                    "Message size mismatch: got {}, expected {}", 
-                    msg.len(), msg_size);
-            let _ = sock.send_to(msg.as_bytes(), broker);
-            local_count += 1;
-            global_counter.fetch_add(1, Ordering::Relaxed);
-            thread::sleep(interval);
-        }
+            let second_start = Instant::now();
+            let mut sent_this_second = 0;
+            let random_payload: String = (0..payload_size)
+                .map(|_| char::from_u32(char_range.sample(&mut rng)).unwrap())
+                .collect();
 
-        // println!("[publisher {:03}] sent {} messages", id, local_count);
+            while sent_this_second < rate {
+                let msg = format!("{}{}", prefix, random_payload);
+                let _ = sock.send_to(msg.as_bytes(), broker);
+                global_counter.fetch_add(1, Ordering::Relaxed);
+                sent_this_second += 1;
+            }
+
+            // Sleep for the remainder of the second if finished early
+            let elapsed = second_start.elapsed();
+            if elapsed < Duration::from_secs(1) {
+                thread::sleep(Duration::from_secs(1) - elapsed);
+            }
+        }
     });
 }
 
