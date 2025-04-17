@@ -72,11 +72,6 @@ fn main() -> std::io::Result<()> {
             pub_total, clone_total, pub_total / 30
         );
         
-        // println!("\nPer-core message distribution:");
-        // for (core_id, counter) in core_counters.iter().enumerate() {
-        //     let count = counter.load(Ordering::Relaxed);
-        //     println!("{}", count);
-        // }
         println!("");
     }
 }

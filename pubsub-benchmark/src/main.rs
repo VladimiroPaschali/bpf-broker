@@ -91,23 +91,23 @@ fn spawn_publisher_thread(
         let char_range = Uniform::new(33, 127);
         
         while start.elapsed() < duration {
-            let second_start = Instant::now();
-            let mut sent_this_second = 0;
+            let half_start = Instant::now();
+            let mut sent_this_half = 0;
             let random_payload: String = (0..payload_size)
                 .map(|_| char::from_u32(char_range.sample(&mut rng)).unwrap())
                 .collect();
 
-            while sent_this_second < rate {
+            while sent_this_half < rate / 2 {
                 let msg = format!("{}{}", prefix, random_payload);
                 let _ = sock.send_to(msg.as_bytes(), broker);
                 global_counter.fetch_add(1, Ordering::Relaxed);
-                sent_this_second += 1;
+                sent_this_half += 1;
             }
 
-            // Sleep for the remainder of the second if finished early
-            let elapsed = second_start.elapsed();
-            if elapsed < Duration::from_secs(1) {
-                thread::sleep(Duration::from_secs(1) - elapsed);
+            // Sleep for the remainder of the half-second window if finished early
+            let elapsed = half_start.elapsed();
+            if elapsed < Duration::from_millis(500) {
+                thread::sleep(Duration::from_millis(500) - elapsed);
             }
         }
     });
