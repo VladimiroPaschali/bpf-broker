@@ -45,6 +45,10 @@ $ cd bmc
 $ chmod +x ./setup-bpf-headers.sh
 $ ./setup-bpf-headers.sh
 $ make
+
+# Install for Rust app
+$ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+$ source $HOME/.cargo/env
 ```
 
 ## Run 
