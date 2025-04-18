@@ -13,20 +13,20 @@ use rand::distributions::{Distribution, Uniform};
 struct Args {
     #[arg(long)]
     topic: String,
+    #[arg(long)]
+    size: usize,
+    #[arg(long)]
+    subs: usize,
+    #[arg(long, default_value_t = 256)]
+    pubs: usize,
     #[arg(long, default_value = "10.10.1.1")]
     broker_ip: String,
     #[arg(long, default_value_t = 11211)]
     broker_port: u16,
-    #[arg(long, default_value_t = 256)]
-    pubs: usize,
-    #[arg(long, default_value_t = 256)]
-    subs: usize,
+    #[arg(long, default_value_t = 150000)]
+    rate: u64,
     #[arg(long, default_value_t = 30)]
-    duration: u64, // seconds
-    #[arg(long, default_value_t = 12000000)]
-    rate: u64, // total messages per second
-    #[arg(long, default_value_t = 1024)]
-    size: usize, // message size in bytes
+    duration: u64,
 }
 
 /// Send a UDP "REGISTER <topic>" message to the broker and wait for optional response
