@@ -3,6 +3,7 @@
 set -euo pipefail
 
 IFACE="enp65s0f0np0"
+MAX_QUEUES=16
 
 echo "Stopping irqbalance..."
 sudo systemctl stop irqbalance 2>/dev/null || echo "[WARN] irqbalance not running"
@@ -25,14 +26,13 @@ while IFS= read -r line; do
     fi
 done < /proc/interrupts
 
-NUM_QUEUES=${#RX_IRQS[@]}
-if [ "$NUM_QUEUES" -eq 0 ]; then
-    echo "[ERROR] No mlx5_compX IRQs found for interface $IFACE (PCI $NIC_PCI)"
+if [ "${#RX_IRQS[@]}" -lt "$MAX_QUEUES" ]; then
+    echo "[ERROR] Found only ${#RX_IRQS[@]} IRQs, but need at least $MAX_QUEUES"
     exit 1
 fi
 
-echo "Pinning $NUM_QUEUES RX IRQs to CPU cores 0–$((NUM_QUEUES - 1))..."
-for ((i = 0; i < NUM_QUEUES; i++)); do
+echo "Pinning $MAX_QUEUES RX IRQs to CPU cores 0–$((MAX_QUEUES - 1))..."
+for ((i = 0; i < MAX_QUEUES; i++)); do
     irq="${RX_IRQS[$i]}"
     core="$i"
     mask=$((1 << core))
@@ -45,8 +45,8 @@ for ((i = 0; i < NUM_QUEUES; i++)); do
     fi
 done
 
-echo -e "\nPinning TX queues via XPS to CPU cores..."
-for ((i = 0; i < NUM_QUEUES; i++)); do
+echo -e "\nPinning TX queues 0–15 via XPS to CPU cores 0–15..."
+for ((i = 0; i < MAX_QUEUES; i++)); do
     mask=$((1 << i))
     printf -v hexmask "%x" "$mask"
     echo "$hexmask" | sudo tee /sys/class/net/$IFACE/queues/tx-${i}/xps_cpus > /dev/null 2>&1
@@ -57,4 +57,4 @@ for ((i = 0; i < NUM_QUEUES; i++)); do
     fi
 done
 
-echo -e "\n✅ Done. IRQs and TX queues pinned 1:1 to CPU cores."
+echo -e "\n✅ Done. First 16 IRQs and TX queues pinned 1:1 to CPU cores 0–15."
