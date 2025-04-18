@@ -3,7 +3,19 @@
 set -euo pipefail
 
 IFACE="enp65s0f0np0"
-MAX_QUEUES=16
+MAX_CORES=16
+DEFAULT_COUNT=16
+
+# Parse argument
+COUNT=${1:-$DEFAULT_COUNT}
+if ! [[ "$COUNT" =~ ^[0-9]+$ ]] || [ "$COUNT" -le 0 ] || [ "$COUNT" -gt "$MAX_CORES" ]; then
+    echo "Usage: $0 [count]"
+    echo "  count: Number of RX/TX pairs to use (1–$MAX_CORES)"
+    exit 1
+fi
+
+echo "Configuring $IFACE to use $COUNT combined queues..."
+sudo ethtool -L $IFACE combined $COUNT
 
 echo "Stopping irqbalance..."
 sudo systemctl stop irqbalance 2>/dev/null || echo "[WARN] irqbalance not running"
@@ -17,44 +29,37 @@ if [ -z "$NIC_PCI" ]; then
     exit 1
 fi
 
-# Parse /proc/interrupts for matching mlx5 IRQs
-RX_IRQS=()
-while IFS= read -r line; do
-    if echo "$line" | grep -q "mlx5_comp" && echo "$line" | grep -q "$NIC_PCI"; then
-        irq=$(echo "$line" | cut -d: -f1 | tr -d ' ')
-        RX_IRQS+=("$irq")
-    fi
-done < /proc/interrupts
+# Find all IRQs for mlx5_compX matching the interface
+IRQ_LINES=($(grep "mlx5_comp.*$NIC_PCI" /proc/interrupts | awk -F: '{print $1}' | tr -d ' '))
 
-if [ "${#RX_IRQS[@]}" -lt "$MAX_QUEUES" ]; then
-    echo "[ERROR] Found only ${#RX_IRQS[@]} IRQs, but need at least $MAX_QUEUES"
+if [ "${#IRQ_LINES[@]}" -lt "$COUNT" ]; then
+    echo "[ERROR] Found only ${#IRQ_LINES[@]} IRQs, but need at least $COUNT"
     exit 1
 fi
 
-echo "Pinning $MAX_QUEUES RX IRQs to CPU cores 0–$((MAX_QUEUES - 1))..."
-for ((i = 0; i < MAX_QUEUES; i++)); do
-    irq="${RX_IRQS[$i]}"
-    core="$i"
-    mask=$((1 << core))
-    printf -v hexmask "%x" "$mask"
-    echo "$hexmask" | sudo tee /proc/irq/$irq/smp_affinity > /dev/null 2>&1
+echo "Pinning $COUNT RX IRQs to CPU cores 0–$((COUNT - 1))..."
+for ((i = 0; i < COUNT; i++)); do
+    IRQ="${IRQ_LINES[$i]}"
+    MASK=$((1 << i))
+    printf -v HEXMASK "%x" "$MASK"
+    echo "$HEXMASK" | sudo tee /proc/irq/$IRQ/smp_affinity > /dev/null 2>&1
     if [ $? -eq 0 ]; then
-        echo "[OK] IRQ $irq → CPU $core (mask=0x$hexmask)"
+        echo "[OK] IRQ $IRQ (RX queue $i) → CPU $i (mask=0x$HEXMASK)"
     else
-        echo "[ERROR] Failed to pin IRQ $irq"
+        echo "[ERROR] Failed to pin IRQ $IRQ"
     fi
 done
 
-echo -e "\nPinning TX queues 0–15 via XPS to CPU cores 0–15..."
-for ((i = 0; i < MAX_QUEUES; i++)); do
-    mask=$((1 << i))
-    printf -v hexmask "%x" "$mask"
-    echo "$hexmask" | sudo tee /sys/class/net/$IFACE/queues/tx-${i}/xps_cpus > /dev/null 2>&1
+echo -e "\nPinning TX queues 0–$((COUNT - 1)) via XPS to CPU cores..."
+for ((i = 0; i < COUNT; i++)); do
+    MASK=$((1 << i))
+    printf -v HEXMASK "%x" "$MASK"
+    echo "$HEXMASK" | sudo tee /sys/class/net/$IFACE/queues/tx-${i}/xps_cpus > /dev/null 2>&1
     if [ $? -eq 0 ]; then
-        echo "[OK] TX queue $i → CPU $i (mask=0x$hexmask)"
+        echo "[OK] TX queue $i → CPU $i (mask=0x$HEXMASK)"
     else
         echo "[ERROR] TX queue $i → failed to write to xps_cpus"
     fi
 done
 
-echo -e "\n✅ Done. First 16 IRQs and TX queues pinned 1:1 to CPU cores 0–15."
+echo -e "\n✅ Done. RX/TX queues 0–$((COUNT - 1)) pinned to CPU cores 0–$((COUNT - 1))."
