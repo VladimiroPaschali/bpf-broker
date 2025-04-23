@@ -47,6 +47,27 @@ struct {
     __type(value, u32);
 } clone_counter SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, u64);
+} avg_latency_tc SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, u64);
+} map_clone_count SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, u64);
+} start_time_map SEC(".maps");
+
 // Inner map: subscriber IP -> dummy (u8)
 struct subscriber_map {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -380,6 +401,10 @@ int tc_ingress_broker(struct __sk_buff *skb)
     struct iphdr *ip;
     struct udphdr *udp;
 
+    __u64 tc_start = bpf_ktime_get_ns();
+    unsigned int key = 0;
+    bpf_map_update_elem(&start_time_map, &key, &tc_start, BPF_ANY);
+
     if (bpf_skb_pull_data(skb, skb->len) < 0)
         return TC_ACT_OK;
 
@@ -448,6 +473,27 @@ int tc_ingress_broker(struct __sk_buff *skb)
         long (*cb_p)(struct bpf_map *, const void *, void *, void *) = &callback_fn;
 
         bpf_for_each_map_elem(inner_map, cb_p, &ctx, 0);
+
+        __u64 *start_ptr = bpf_map_lookup_elem(&start_time_map, &key);
+        __u64 *avg_ptr = bpf_map_lookup_elem(&avg_latency_tc, &key);
+        __u64 *count_ptr = bpf_map_lookup_elem(&map_clone_count, &key);
+
+        if (start_ptr && avg_ptr && count_ptr) {
+            __u64 end = bpf_ktime_get_ns();
+            __u64 duration = end - *start_ptr;
+            __u64 count = *count_ptr;
+
+            // Rolling average: avg = (prev_avg * count + duration) / (count + 1)
+            __u64 new_avg = (*avg_ptr * count + duration) / (count + 1);
+
+            // Write back
+            *avg_ptr = new_avg;
+            *count_ptr = count + 1;
+
+            bpf_map_update_elem(&avg_latency_tc, &key, avg_ptr, BPF_ANY);
+            bpf_map_update_elem(&map_clone_count, &key, count_ptr, BPF_ANY);
+            // bpf_printk("[%d] TC: Avg latency %lld ns", count, new_avg);
+        }
 
         return TC_ACT_SHOT;
     }
