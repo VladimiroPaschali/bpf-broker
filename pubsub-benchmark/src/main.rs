@@ -62,7 +62,6 @@ fn spawn_subscriber(topic: String, id: usize, broker: SocketAddr) {
 
 /// Each publisher thread sends messages to the broker at a constant rate
 fn spawn_publisher_thread(
-    id: usize,
     rate: u64,
     duration: Duration,
     topic: String,
@@ -71,8 +70,12 @@ fn spawn_publisher_thread(
     msg_size: usize,
 ) {
     thread::spawn(move || {
-        let sock = UdpSocket::bind(("0.0.0.0", 30000 + id as u16))
-            .expect("Failed to bind UDP socket");
+        let port_range = Uniform::from(30000..40000);
+        let mut rng = rand::thread_rng();
+        let random_port: u16 = port_range.sample(&mut rng);
+
+        let sock = UdpSocket::bind(("0.0.0.0", random_port))
+            .unwrap_or_else(|e| panic!("Failed to bind UDP socket on port {}: {}", random_port, e));
 
         let start = Instant::now();
 
@@ -174,9 +177,8 @@ fn main() {
     }
 
     // Step 4: Launch publishers
-    for id in 0..args.pubs {
+    for _ in 0..args.pubs {
         spawn_publisher_thread(
-            id,
             per_publisher_rate,
             duration,
             args.topic.clone(),
