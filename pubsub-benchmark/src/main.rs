@@ -72,10 +72,26 @@ fn spawn_publisher_thread(
     thread::spawn(move || {
         let port_range = Uniform::from(30000..40000);
         let mut rng = rand::thread_rng();
-        let random_port: u16 = port_range.sample(&mut rng);
+        let mut attempts = 0;
+        let max_attempts = 100;
 
-        let sock = UdpSocket::bind(("0.0.0.0", random_port))
-            .unwrap_or_else(|e| panic!("Failed to bind UDP socket on port {}: {}", random_port, e));
+        // Retry bind until success or max attempts reached
+        let sock = loop {
+            let random_port: u16 = port_range.sample(&mut rng);
+            match UdpSocket::bind(("0.0.0.0", random_port)) {
+                Ok(s) => break s,
+                Err(e) => {
+                    eprintln!(
+                        "[!] Failed to bind to port {}: {}. Retrying...",
+                        random_port, e
+                    );
+                    attempts += 1;
+                    if attempts >= max_attempts {
+                        panic!("Failed to bind to any port in 100 attempts.");
+                    }
+                }
+            }
+        };
 
         let start = Instant::now();
 
@@ -90,7 +106,6 @@ fn spawn_publisher_thread(
             1  // Minimum 1 character payload
         };
 
-        let mut rng = rand::thread_rng();
         let char_range = Uniform::new(33, 127);
         
         while start.elapsed() < duration {
