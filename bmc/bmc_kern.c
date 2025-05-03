@@ -47,26 +47,26 @@ struct {
     __type(value, u32);
 } clone_counter SEC(".maps");
 
-struct {
-    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, u32);
-    __type(value, u64);
-} avg_latency_tc SEC(".maps");
+// struct {
+//     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+//     __uint(max_entries, 1);
+//     __type(key, u32);
+//     __type(value, u64);
+// } avg_latency_tc SEC(".maps");
 
-struct {
-    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, u32);
-    __type(value, u64);
-} map_clone_count SEC(".maps");
+// struct {
+//     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+//     __uint(max_entries, 1);
+//     __type(key, u32);
+//     __type(value, u64);
+// } map_clone_count SEC(".maps");
 
-struct {
-    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, u32);
-    __type(value, u64);
-} start_time_map SEC(".maps");
+// struct {
+//     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+//     __uint(max_entries, 1);
+//     __type(key, u32);
+//     __type(value, u64);
+// } start_time_map SEC(".maps");
 
 // Inner map: subscriber IP -> dummy (u8)
 struct subscriber_map {
@@ -260,7 +260,7 @@ static __inline void bpf_printk_ip(__be32 ip, __be16 port, const char *prefix) {
     bpf_printk("%s %d.%d.%d.%d:%d\n", prefix, a, b, c, d, bpf_ntohs(port));
 }
 
-static long callback_fn(struct bpf_map *map, const void *key, void *value, void *ctx_void)
+static __always_inline long callback_fn(struct bpf_map *map, const void *key, void *value, void *ctx_void)
 {
     struct callback_ctx *ctx = (struct callback_ctx *)ctx_void;
     struct __sk_buff *skb = ctx->skb;
@@ -401,9 +401,9 @@ int tc_ingress_broker(struct __sk_buff *skb)
     struct iphdr *ip;
     struct udphdr *udp;
 
-    __u64 tc_start = bpf_ktime_get_ns();
-    unsigned int key = 0;
-    bpf_map_update_elem(&start_time_map, &key, &tc_start, BPF_ANY);
+    // __u64 tc_start = bpf_ktime_get_ns();
+    // unsigned int key = 0;
+    // bpf_map_update_elem(&start_time_map, &key, &tc_start, BPF_ANY);
 
     if (bpf_skb_pull_data(skb, skb->len) < 0)
         return TC_ACT_OK;
@@ -474,26 +474,26 @@ int tc_ingress_broker(struct __sk_buff *skb)
 
         bpf_for_each_map_elem(inner_map, cb_p, &ctx, 0);
 
-        __u64 *start_ptr = bpf_map_lookup_elem(&start_time_map, &key);
-        __u64 *avg_ptr = bpf_map_lookup_elem(&avg_latency_tc, &key);
-        __u64 *count_ptr = bpf_map_lookup_elem(&map_clone_count, &key);
+        // __u64 *start_ptr = bpf_map_lookup_elem(&start_time_map, &key);
+        // __u64 *avg_ptr = bpf_map_lookup_elem(&avg_latency_tc, &key);
+        // __u64 *count_ptr = bpf_map_lookup_elem(&map_clone_count, &key);
 
-        if (start_ptr && avg_ptr && count_ptr) {
-            __u64 end = bpf_ktime_get_ns();
-            __u64 duration = end - *start_ptr;
-            __u64 count = *count_ptr;
+        // if (start_ptr && avg_ptr && count_ptr) {
+        //     __u64 end = bpf_ktime_get_ns();
+        //     __u64 duration = end - *start_ptr;
+        //     __u64 count = *count_ptr;
 
-            // Rolling average: avg = (prev_avg * count + duration) / (count + 1)
-            __u64 new_avg = (*avg_ptr * count + duration) / (count + 1);
+        //     // Rolling average: avg = (prev_avg * count + duration) / (count + 1)
+        //     __u64 new_avg = (*avg_ptr * count + duration) / (count + 1);
 
-            // Write back
-            *avg_ptr = new_avg;
-            *count_ptr = count + 1;
+        //     // Write back
+        //     *avg_ptr = new_avg;
+        //     *count_ptr = count + 1;
 
-            bpf_map_update_elem(&avg_latency_tc, &key, avg_ptr, BPF_ANY);
-            bpf_map_update_elem(&map_clone_count, &key, count_ptr, BPF_ANY);
-            // bpf_printk("[%d] TC: Avg latency %lld ns", count, new_avg);
-        }
+        //     bpf_map_update_elem(&avg_latency_tc, &key, avg_ptr, BPF_ANY);
+        //     bpf_map_update_elem(&map_clone_count, &key, count_ptr, BPF_ANY);
+        //     // bpf_printk("[%d] TC: Avg latency %lld ns", count, new_avg);
+        // }
 
         return TC_ACT_SHOT;
     }
