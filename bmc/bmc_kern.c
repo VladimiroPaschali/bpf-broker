@@ -47,6 +47,13 @@ struct {
     __type(value, u32);
 } clone_counter SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+    __uint(max_entries, 64); // Supports up to 64 TX queues
+    __type(key, u32);        // queue_mapping
+    __type(value, u64);      // packet count
+} queue_count_map SEC(".maps");
+
 // struct {
 //     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 //     __uint(max_entries, 1);
@@ -308,7 +315,15 @@ static __always_inline long callback_fn(struct bpf_map *map, const void *key, vo
     if (refresh_headers(skb, &data, &data_end, &eth, &ip, &udp) < 0)
         return TC_ACT_OK;
 
-    // bpf_printk_ip(ip->daddr, udp->dest, "Callback: Cloning packet to");
+    __u32 qid = ctx->skb->queue_mapping;
+    __u64 init = 1;
+    __u64 *cnt = bpf_map_lookup_elem(&queue_count_map, &qid);
+    if (cnt) {
+        __sync_fetch_and_add(cnt, 1);
+    } else {
+        bpf_map_update_elem(&queue_count_map, &qid, &init, BPF_ANY);
+    }
+
     bpf_clone_redirect(ctx->skb, ctx->skb->ifindex, 0);
     __u32 idx = 0;
     __u32 *counter = bpf_map_lookup_elem(&clone_counter, &idx);

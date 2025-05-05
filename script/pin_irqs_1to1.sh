@@ -62,4 +62,17 @@ for ((i = 0; i < COUNT; i++)); do
     fi
 done
 
-echo -e "\n✅ Done. RX/TX queues 0–$((COUNT - 1)) pinned to CPU cores 0–$((COUNT - 1))."
+echo -e "\nRX/TX queues 0–$((COUNT - 1)) pinned to CPU cores 0–$((COUNT - 1))."
+
+for ((i = 0; i < COUNT; i++)); do
+    MASK=$((1 << i))
+    printf -v HEXMASK "%x" "$MASK"
+    echo "$HEXMASK" | sudo tee /sys/class/net/$IFACE/queues/rx-${i}/rps_cpus > /dev/null
+    echo "[OK] RX queue $i → RPS set to CPU $i (mask=0x$HEXMASK)"
+done
+
+echo 32767 | sudo tee /proc/sys/net/core/rps_sock_flow_entries > /dev/null
+
+echo -e "\nRPS entries set to 32767."
+
+echo -e "\nDone."
