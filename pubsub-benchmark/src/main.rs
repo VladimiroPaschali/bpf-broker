@@ -14,17 +14,15 @@ struct Args {
     #[arg(long)]
     topic: String,
     #[arg(long)]
-    size: usize,
-    #[arg(long)]
     subs: usize,
-    #[arg(long, default_value_t = 256)]
+    #[arg(long, default_value_t = 1450)]
+    size: usize,
+    #[arg(long, default_value_t = 1)]
     pubs: usize,
     #[arg(long, default_value = "10.10.1.1")]
     broker_ip: String,
-    #[arg(long, default_value_t = 11211)]
+    #[arg(long, default_value_t = 49152)]
     broker_port: u16,
-    #[arg(long, default_value_t = 150000)]
-    rate: u64,
     #[arg(long, default_value_t = 30)]
     duration: u64,
 }
@@ -36,7 +34,9 @@ fn register_topic(topic: &str, broker: SocketAddr) {
 
     let msg = format!("REGISTER {}", topic);
     println!("[>] Sending: {}", msg);
-    let _ = sock.send_to(msg.as_bytes(), broker);
+    if let Err(e) = sock.send_to(msg.as_bytes(), broker) {
+        eprintln!("[!] Failed to send: {}", e);
+    }
 
     let mut buf = [0u8; 1024];
     match sock.recv_from(&mut buf) {
@@ -56,77 +56,56 @@ fn spawn_subscriber(topic: String, id: usize, broker: SocketAddr) {
         let port = (15000 + id) as u16;
         let sock = UdpSocket::bind(("0.0.0.0", port)).expect("Failed to bind subscriber socket");
         let sub_msg = format!("SUBSCRIBE {}", topic);
-        let _ = sock.send_to(sub_msg.as_bytes(), broker);
+        if let Err(e) = sock.send_to(sub_msg.as_bytes(), broker) {
+            eprintln!("[!] Failed to send: {}", e);
+        }
     });
 }
 
-/// Each publisher thread sends messages to the broker at a constant rate
-fn spawn_publisher_thread(
-    rate: u64,
+fn spawn_multiport_publisher_thread(
     duration: Duration,
     topic: String,
-    broker: SocketAddr,
+    broker_ip: String,
+    dest_ports: Vec<u16>,
     global_counter: Arc<AtomicUsize>,
     msg_size: usize,
 ) {
     thread::spawn(move || {
         let port_range = Uniform::from(30000..40000);
         let mut rng = rand::thread_rng();
-        let mut attempts = 0;
-        let max_attempts = 100;
 
-        // Retry bind until success or max attempts reached
         let sock = loop {
             let random_port: u16 = port_range.sample(&mut rng);
             match UdpSocket::bind(("0.0.0.0", random_port)) {
                 Ok(s) => break s,
-                Err(e) => {
-                    eprintln!(
-                        "[!] Failed to bind to port {}: {}. Retrying...",
-                        random_port, e
-                    );
-                    attempts += 1;
-                    if attempts >= max_attempts {
-                        panic!("Failed to bind to any port in 100 attempts.");
-                    }
-                }
+                Err(_) => continue,
             }
         };
-
-        let start = Instant::now();
 
         let prefix = format!("PUBLISH {} ", topic);
         let prefix_len = prefix.len();
-        
-        // Adjust payload size to account for prefix
-        let payload_size = if msg_size > prefix_len {
-            msg_size - prefix_len
-        } else {
-            println!("[Warning] Requested message size {} is too small for prefix length {}. Using minimum size.", msg_size, prefix_len);
-            1  // Minimum 1 character payload
-        };
+        let payload_size = msg_size.saturating_sub(prefix_len);
+        let payload_chars = Uniform::new(33, 127);
 
-        let char_range = Uniform::new(33, 127);
-        
+        let port_selector = Uniform::from(0..dest_ports.len());
+        let start = Instant::now();
+
         while start.elapsed() < duration {
-            let half_start = Instant::now();
-            let mut sent_this_half = 0;
             let random_payload: String = (0..payload_size)
-                .map(|_| char::from_u32(char_range.sample(&mut rng)).unwrap())
+                .map(|_| char::from_u32(payload_chars.sample(&mut rng)).unwrap())
                 .collect();
+            let msg = format!("{}{}", prefix, random_payload);
 
-            while sent_this_half < rate / 2 {
-                let msg = format!("{}{}", prefix, random_payload);
-                let _ = sock.send_to(msg.as_bytes(), broker);
-                global_counter.fetch_add(1, Ordering::Relaxed);
-                sent_this_half += 1;
-            }
+            // Randomly choose a destination port
+            let port = dest_ports[port_selector.sample(&mut rng)];
+            let broker = format!("{}:{}", broker_ip, port)
+                .parse::<SocketAddr>()
+                .unwrap();
 
-            // Sleep for the remainder of the half-second window if finished early
-            let elapsed = half_start.elapsed();
-            if elapsed < Duration::from_millis(500) {
-                thread::sleep(Duration::from_millis(500) - elapsed);
+            if let Err(e) = sock.send_to(msg.as_bytes(), broker) {
+                eprintln!("[!] Failed to send: {}", e);
             }
+            global_counter.fetch_add(1, Ordering::Relaxed);
         }
     });
 }
@@ -139,12 +118,11 @@ fn main() {
         .expect("Invalid broker address");
 
     println!(
-        "[*] Starting {} publishers and {} subscribers targeting {} for {}s at {} msg/sec (total), msg_size: {}B",
-        args.pubs, args.subs, broker_addr, args.duration, args.rate, args.size
+        "[*] Starting {} publishers and {} subscribers targeting {} for {}s, msg_size: {}B",
+        args.pubs, args.subs, broker_addr, args.duration, args.size
     );
 
     let global_counter = Arc::new(AtomicUsize::new(0));
-    let per_publisher_rate = args.rate / args.pubs as u64;
     let duration = Duration::from_secs(args.duration);
 
     // Step 1: Register the topic once
@@ -175,7 +153,6 @@ fn main() {
                 let delta = total - last;
                 last = total;
 
-                // Assume 64-byte messages
                 let bits = (delta * args.size * 8) as f64;
                 let mbits = bits / 1_000_000.0;
 
@@ -191,19 +168,20 @@ fn main() {
         });
     }
 
-    // Step 4: Launch publishers
+    let dest_ports: Vec<u16> = (49152..49168).collect();
+
     for _ in 0..args.pubs {
-        spawn_publisher_thread(
-            per_publisher_rate,
+        spawn_multiport_publisher_thread(
             duration,
             args.topic.clone(),
-            broker_addr,
+            args.broker_ip.clone(),
+            dest_ports.clone(), // clone since each thread owns it
             global_counter.clone(),
             args.size,
         );
     }
 
-    thread::sleep(duration + Duration::from_secs(2)); // Let threads finish
+    thread::sleep(duration + Duration::from_secs(2));
 
     let final_count = global_counter.load(Ordering::Relaxed);
     println!("\n=== Final Results ===");
