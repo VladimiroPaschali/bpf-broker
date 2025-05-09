@@ -38,14 +38,14 @@ struct {
     __uint(max_entries, 1);
     __type(key, u32);
     __type(value, u32);
-} publish_counter SEC(".maps");
+} pub_counter_2 SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __uint(max_entries, 1);
     __type(key, u32);
     __type(value, u32);
-} clone_counter SEC(".maps");
+} clone_counter_2 SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
@@ -326,7 +326,7 @@ static __always_inline long callback_fn(struct bpf_map *map, const void *key, vo
 
     bpf_clone_redirect(ctx->skb, ctx->skb->ifindex, 0);
     __u32 idx = 0;
-    __u32 *counter = bpf_map_lookup_elem(&clone_counter, &idx);
+    __u32 *counter = bpf_map_lookup_elem(&clone_counter_2, &idx);
     if (counter) {
         __sync_fetch_and_add(counter, 1);
     }
@@ -349,14 +349,15 @@ int xdp_broker(struct xdp_md *ctx)
     if (parse_udp_packet(ctx, &data, &data_end, &eth, &ip, &udp, &payload) < 0)
         return XDP_PASS;
 
-    if (bpf_ntohs(udp->dest) != 11211)
+    __u16 dport = bpf_ntohs(udp->dest);
+    if (dport < 49152 || dport > 49167)
         return XDP_PASS;
 
     if (!starts_with(payload, "PUBLISH ", data_end))
         return XDP_PASS;
 
     __u32 idx = 0;
-    __u32 *p_counter = bpf_map_lookup_elem(&publish_counter, &idx);
+    __u32 *p_counter = bpf_map_lookup_elem(&pub_counter_2, &idx);
     if (p_counter) {
         __sync_fetch_and_add(p_counter, 1);
     }
@@ -398,7 +399,7 @@ int xdp_broker(struct xdp_md *ctx)
     udp->check = 0;
     udp->check = compute_udp_checksum(ip, udp, udp + 1, data_end);
 
-    __u32 *c_counter = bpf_map_lookup_elem(&clone_counter, &idx);
+    __u32 *c_counter = bpf_map_lookup_elem(&clone_counter_2, &idx);
     if (c_counter) {
         __sync_fetch_and_add(c_counter, 1);
     }
@@ -426,14 +427,15 @@ int tc_ingress_broker(struct __sk_buff *skb)
     if (refresh_headers(skb, &data, &data_end, &eth, &ip, &udp) < 0)
         return TC_ACT_OK;
 
-    if (ntohs(udp->dest) != 11211)
+    __u16 dport = bpf_ntohs(udp->dest);
+    if (dport < 49152 || dport > 49167)
         return TC_ACT_OK;
 
     char *payload = (void *)udp + sizeof(*udp);
 
     if (starts_with(payload, "PUBLISH ", data_end)) {
         __u32 idx = 0;
-        __u32 *counter = bpf_map_lookup_elem(&publish_counter, &idx);
+        __u32 *counter = bpf_map_lookup_elem(&pub_counter_2, &idx);
         if (counter) {
             __sync_fetch_and_add(counter, 1);
         }

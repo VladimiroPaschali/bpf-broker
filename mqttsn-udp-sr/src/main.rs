@@ -16,16 +16,17 @@ use std::{
 type Topic = String;
 type SubscriberSet = HashSet<SocketAddr>;
 
-fn create_reuse_socket() -> std::io::Result<UdpSocket> {
+fn create_reuse_socket(port: u16) -> std::io::Result<UdpSocket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_nonblocking(true)?;
     socket.set_reuse_port(true)?;
     
-    let addr = "0.0.0.0:11211".parse::<SocketAddr>().unwrap();
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     socket.bind(&addr.into())?;
     
     Ok(UdpSocket::from(socket))
 }
+
 
 fn main() -> std::io::Result<()> {
     let topics: Arc<DashMap<Topic, SubscriberSet>> = Arc::new(DashMap::new());
@@ -34,29 +35,32 @@ fn main() -> std::io::Result<()> {
     let core_counters: Arc<Vec<AtomicUsize>> = Arc::new((0..16).map(|_| AtomicUsize::new(0)).collect());
     // let core_latencies: Arc<Vec<Mutex<Vec<u64>>>> = Arc::new((0..16).map(|_| Mutex::new(Vec::new())).collect());
 
+    let base_port = 49152;
+
     for core_id in 0..16 {
-        let sock = Arc::new(create_reuse_socket()?);
+        let port = base_port + core_id;
+        let sock = Arc::new(create_reuse_socket(port)?);
         let topics = Arc::clone(&topics);
         let pub_count = Arc::clone(&publish_counter);
         let clone_count = Arc::clone(&clone_counter);
         let core_counts = Arc::clone(&core_counters);
-        // let latencies = Arc::clone(&core_latencies);
 
         thread::spawn(move || {
-            affinity::set_thread_affinity([core_id]).unwrap();
-            println!("[thread-{core_id}] Started and pinned");
+            affinity::set_thread_affinity(&[core_id as usize]).unwrap();
+
+            println!("[thread-{core_id}] Listening on port {port} and pinned");
 
             let mut buf = [0u8; 4096];
             loop {
                 match sock.recv_from(&mut buf) {
                     Ok((n, addr)) => {
-                        core_counts[core_id].fetch_add(1, Ordering::Relaxed);
+                        core_counts[core_id as usize].fetch_add(1, Ordering::Relaxed);
                         let msg = String::from_utf8_lossy(&buf[..n]).to_string();
                         handle_message(
                             &msg, addr, &sock, &topics,
                             &pub_count, &clone_count,
-                            core_id
-                        );
+                            core_id as usize
+                        );                        
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(1));
@@ -74,9 +78,9 @@ fn main() -> std::io::Result<()> {
         let pub_total = publish_counter.load(Ordering::Relaxed);
         let clone_total = clone_counter.load(Ordering::Relaxed);
 
-        // for (core_id, count) in core_counters.iter().enumerate() {
-        //     println!("[thread-{core_id}] QPS: {}", count.load(Ordering::Relaxed));
-        // }
+        for (core_id, count) in core_counters.iter().enumerate() {
+            println!("[thread-{core_id}] count: {}", count.load(Ordering::Relaxed));
+        }
 
         // let mut all_latencies = Vec::new();
         // for mutex in core_latencies.iter() {
@@ -107,7 +111,7 @@ fn handle_message(
     topics: &DashMap<Topic, SubscriberSet>,
     publish_counter: &AtomicUsize,
     clone_counter: &AtomicUsize,
-    core_id: usize,
+    _core_id: usize,
     // core_latencies: &Arc<Vec<Mutex<Vec<u64>>>>,
 ) {
     let mut parts = msg.trim().splitn(3, ' ');
