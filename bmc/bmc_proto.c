@@ -228,7 +228,7 @@ int main() {
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
         .sin_addr.s_addr = INADDR_ANY,
-        .sin_port = htons(11211),
+        .sin_port = htons(49152),
     };
 
     if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
@@ -236,7 +236,7 @@ int main() {
         return 1;
     }
 
-    printf("Listening for UDP on port 11211...\n");
+    printf("Listening for UDP on port 49152...\n");
 
     char buf[1024];
     struct sockaddr_in client;
