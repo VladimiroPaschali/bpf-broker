@@ -6,11 +6,10 @@ use std::{
     net::{SocketAddr, UdpSocket},
     str,
     sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering}, Arc,
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 type Topic = String;
@@ -132,22 +131,21 @@ fn handle_message(
             }
         }
         Some("PUBLISH") => {
-            if let (Some(topic), Some(payload)) = (parts.next(), parts.next()) {
-                let start = Instant::now();
+            if let (Some(topic), Some(rest)) = (parts.next(), parts.next()) {
+                let raw_payload = format!("PUBLISH {} {}", topic, rest);
                 publish_counter.fetch_add(1, Ordering::Relaxed);
 
                 if let Some(subs) = topics.get(topic) {
                     for sub in subs.iter() {
-                        let _ = sock.send_to(payload.as_bytes(), *sub);
+                        // println!("[publish] Sending to {} with payload {} ", sub, raw_payload);
+                        if let Err(e) = sock.send_to(raw_payload.as_bytes(), *sub) {
+                            eprintln!("[publish] Failed to send to {}: {}", sub, e);
+                        }
                         clone_counter.fetch_add(1, Ordering::Relaxed);
                     }
                 } else {
                     println!("[publish] No topic '{}' registered", topic);
                 }
-
-                // let latency_ns = start.elapsed().as_nanos() as u64;
-                // let mut vec = core_latencies[core_id].lock().unwrap();
-                // vec.push(latency_ns);
             }
         }
         _ => {
