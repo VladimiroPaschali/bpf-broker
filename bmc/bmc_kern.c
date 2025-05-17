@@ -75,7 +75,7 @@ struct {
 //     __type(value, u64);
 // } start_time_map SEC(".maps");
 
-// Inner map: subscriber IP -> dummy (u8)
+// Inner map: subscriber addr 
 struct subscriber_map {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, MAX_SUBSCRIBERS);
@@ -324,7 +324,11 @@ static __always_inline long callback_fn(struct bpf_map *map, const void *key, vo
         bpf_map_update_elem(&queue_count_map, &qid, &init, BPF_ANY);
     }
 
-    bpf_clone_redirect(ctx->skb, ctx->skb->ifindex, 0);
+    int ret = bpf_clone_redirect(ctx->skb, ctx->skb->ifindex, 0);
+    if (ret < 0) {
+        bpf_printk("clone_redirect failed\n");
+    }
+
     __u32 idx = 0;
     __u32 *counter = bpf_map_lookup_elem(&clone_counter_2, &idx);
     if (counter) {
