@@ -13,8 +13,6 @@
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 
-#include "bpf_broker_common.h"
-
 #define BPF_SYSFS_ROOT "/sys/fs/bpf"
 
 
