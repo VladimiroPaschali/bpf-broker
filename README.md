@@ -41,7 +41,7 @@ $ sudo apt update && sudo apt install -y \
 ```bash
 $ ./kernel-src-download.sh
 $ ./kernel-src-prepare.sh
-$ cd bmc 
+$ cd bpf_broker 
 $ chmod +x ./setup-bpf-headers.sh
 $ ./setup-bpf-headers.sh
 $ make
@@ -55,12 +55,12 @@ $ source $HOME/.cargo/env
 
 ```bash
 # terminal 1 for BPF-enabled publish path
-$ cd bmc
-$ sudo ./bmc <interface_idx>
+$ cd bpf_broker
+$ sudo ./bpf_broker <interface_idx>
 
 # terminal 2 for BPF-enabled register & subscribe path
-$ cd bmc
-$ sudo ./bmc_proto
+$ cd bpf_broker
+$ sudo ./bpf_broker_proto
 
 # terminal 3 for TC hook and log monitoring
 $ cd script

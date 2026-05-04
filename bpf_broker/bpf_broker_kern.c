@@ -6,7 +6,7 @@
 #include <bpf_endian.h>
 #include <linux/string.h>
 
-#include "bmc_common.h"
+#include "bpf_broker_common.h"
 
 #define MAX_TOPIC_ID 10
 #define MAX_SUBSCRIBERS 2048
@@ -22,14 +22,14 @@ struct {
     __uint(type, BPF_MAP_TYPE_PROG_ARRAY);
     __uint(key_size, sizeof(u32));
     __uint(value_size, sizeof(u32));
-    __uint(max_entries, BMC_PROG_XDP_MAX);
+    __uint(max_entries, BPF_BROKER_PROG_XDP_MAX);
 } map_progs_xdp SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_PROG_ARRAY);
     __uint(key_size, sizeof(u32));
     __uint(value_size, sizeof(u32));
-    __uint(max_entries, BMC_PROG_TC_MAX);
+    __uint(max_entries, BPF_BROKER_PROG_TC_MAX);
 } map_progs_tc SEC(".maps");
 
 /* stat maps */

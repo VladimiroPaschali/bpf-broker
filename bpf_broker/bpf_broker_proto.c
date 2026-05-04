@@ -187,26 +187,26 @@ int add_topic(int outer_fd, const char *topic_name) {
 
 
 int main() {
-    printf("Starting BMC...\n");
+    printf("Starting BPF-Broker...\n");
     int outer_fd = bpf_obj_get("/sys/fs/bpf/topic_subscribe");
     if (outer_fd < 0) {
         perror("bpf_obj_get");
         return 1;
     }
-    printf("BMC: outer_fd = %d\n", outer_fd);
+    printf("BPF-Broker: outer_fd = %d\n", outer_fd);
 
     int sub_count_fd = bpf_obj_get("/sys/fs/bpf/topic_sub_cnt");
     if (sub_count_fd < 0) {
         perror("bpf_obj_get");
         return 1;
     }
-    printf("BMC: sub_count_fd = %d\n", sub_count_fd);
+    printf("BPF-Broker: sub_count_fd = %d\n", sub_count_fd);
     int first_sub_fd = bpf_obj_get("/sys/fs/bpf/topic_first_sub");
     if (first_sub_fd < 0) {
         perror("bpf_obj_get");
         return 1;
     }
-    printf("BMC: first_sub_fd = %d\n", first_sub_fd);
+    printf("BPF-Broker: first_sub_fd = %d\n", first_sub_fd);
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         perror("socket");

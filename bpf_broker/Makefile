@@ -1,4 +1,4 @@
-# Software Name : bmc-cache
+# Software Name : bpf-broker
 # SPDX-FileCopyrightText: Copyright (c) 2021 Orange
 # SPDX-License-Identifier: LGPL-2.1-only
 #
@@ -11,15 +11,15 @@
 #	kernel sources available under ./linux and libbpf statically
 #	compiled in Linux source tree.
 #
-#	bmc_kern.c depends on kernel headers and bpf_helpers.h
-#	bmc_user.c depends on libbpf
+#	bpf_broker_kern.c depends on kernel headers and bpf_helpers.h
+#	bpf_broker_user.c depends on libbpf
 
 LINUX_PATH ?= ./linux
 LINUX_TOOLS_PATH = $(LINUX_PATH)/tools
 LINUX_LIB_PATH = $(LINUX_TOOLS_PATH)/lib
 LIBBPF_PATH = $(LINUX_LIB_PATH)/bpf
 
-TARGETS += bmc
+TARGETS += bpf_broker
 
 CLANG ?= clang
 LLC ?= llc
@@ -136,8 +136,8 @@ $(TARGETS): %: %_user.c $(OBJECTS) $(LIBBPF)
 	$(CC) $(CFLAGS) $(OBJECTS) -o $@ $< $(LIBBPF) $(LDFLAGS)
 
 
-PROTO := bmc_proto
-PROTO_OBJECTS := bmc_proto.o
+PROTO := bpf_broker_proto
+PROTO_OBJECTS := bpf_broker_proto.o
 
 $(PROTO): $(PROTO_OBJECTS) $(LIBBPF)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)

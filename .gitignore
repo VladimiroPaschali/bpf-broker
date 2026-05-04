@@ -60,3 +60,9 @@ linux-*.tar.sign
 
 # stats
 stats/*
+
+# Paper
+bpf-broker.pdf
+
+# Claude Code
+CLAUDE.md
