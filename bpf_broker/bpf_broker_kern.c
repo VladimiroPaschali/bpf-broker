@@ -1,10 +1,15 @@
 #include <linux/bpf.h>
+#include <linux/stddef.h>
+#include <linux/types.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
 #include <linux/udp.h>
+#include <linux/in.h>
+#include <linux/pkt_cls.h>
 #include <bpf_helpers.h>
 #include <bpf_endian.h>
 #include <linux/string.h>
+#include <stdbool.h>
 
 #include "bpf_broker_common.h"
 
@@ -180,26 +185,36 @@ static __always_inline int parse_udp_packet(struct xdp_md *ctx,
     *data_end = (void *)(long)ctx->data_end;
 
     *eth = *data;
-    if ((void *)(*eth + 1) > *data_end)
+    if ((void *)(*eth + 1) > *data_end){
+        // bpf_printk("eth\n");
         return -1;
+    }
 
-    if ((*eth)->h_proto != __constant_htons(ETH_P_IP))
+    if ((*eth)->h_proto != __constant_htons(ETH_P_IP)){
+        // bpf_printk("eth proto\n");
         return -1;
+    }
 
     *ip = (void *)(*eth + 1);
-    if ((void *)(*ip + 1) > *data_end)
+    if ((void *)(*ip + 1) > *data_end){
+        // bpf_printk("ip\n");
         return -1;
+    }
 
     if ((*ip)->protocol != IPPROTO_UDP)
         return -1;
 
     *udp = (void *)(*ip + 1);
-    if ((void *)(*udp + 1) > *data_end)
+    if ((void *)(*udp + 1) > *data_end){
+        // bpf_printk("udp\n");
         return -1;
+    }
 
     *payload = (char *)(*udp + 1);
-    if ((void *)(*payload + 1) > *data_end)
+    if ((void *)(*payload + 1) > *data_end){
+        // bpf_printk("payload\n");
         return -1;
+    }
 
     return 0;
 }
@@ -347,18 +362,24 @@ int xdp_broker(struct xdp_md *ctx)
     struct udphdr *udp;
     char *payload;
 
-    if (true)
-        return XDP_PASS;
+    // if (true)
+        // return XDP_PASS;
 
-    if (parse_udp_packet(ctx, &data, &data_end, &eth, &ip, &udp, &payload) < 0)
+    if (parse_udp_packet(ctx, &data, &data_end, &eth, &ip, &udp, &payload) < 0){
+        // bpf_printk("udp\n");
         return XDP_PASS;
+    }
 
     __u16 dport = bpf_ntohs(udp->dest);
-    if (dport < 49152 || dport > 49167)
+    if (dport < 49152 || dport > 49167){
+        // bpf_printk("port %d\n", dport);
         return XDP_PASS;
+    }
 
-    if (!starts_with(payload, "PUBLISH ", data_end))
+    if (!starts_with(payload, "PUBLISH ", data_end)){
+        // bpf_printk("not publish\n");
         return XDP_PASS;
+    }
 
     __u32 idx = 0;
     __u32 *p_counter = bpf_map_lookup_elem(&pub_counter_2, &idx);
@@ -367,16 +388,23 @@ int xdp_broker(struct xdp_md *ctx)
     }
 
     char topic_id[MAX_TOPIC_ID_CHARS] = {};
-    if (extract_topic_id(payload + 8, data_end, topic_id) < 0)
+    if (extract_topic_id(payload + 8, data_end, topic_id) < 0){
+        // bpf_printk("failed to extract topic ID\n");
         return XDP_PASS;
+    }
 
     __u32 *sub_count = bpf_map_lookup_elem(&topic_sub_cnt, &topic_id);
-    if (!sub_count || *sub_count != 1)
+    if (!sub_count || *sub_count != 1){
+        // bpf_printk("sub value is %d\n", sub_count ? *sub_count : -1);
+        // bpf_printk("no subscribers for topic '%s'\n", topic_id);
         return XDP_PASS;
+    }
 
     __u64 *packed_ptr = bpf_map_lookup_elem(&topic_first_sub, &topic_id);
-    if (!packed_ptr)
+    if (!packed_ptr){
+        // bpf_printk("failed to lookup topic first subscriber\n");
         return XDP_DROP;
+    }
 
     __u64 packed = *packed_ptr;
     __u32 dest_ip = packed >> 32;

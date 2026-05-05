@@ -8,6 +8,8 @@
 #include <sys/resource.h>
 #include <linux/if_link.h>
 #include <linux/limits.h>
+#include <net/if.h>
+#include <ctype.h>
 
 #include <linux/bpf.h>
 #include <bpf/bpf.h>
@@ -72,10 +74,17 @@ int pin_map(struct bpf_object *obj, const char *map_name) {
 	if (bpf_obj_pin(map_fd, pin_path) != 0) {
 		if (errno == EEXIST) {
 			fprintf(stdout, "'%s' already pinned, unpinning to replace\n", map_name);
+			// Close the old pinned map first
+			int old_fd = bpf_obj_get(pin_path);
+			if (old_fd >= 0) {
+				close(old_fd);
+			}
+			// Now remove the pin
 			if (unlink(pin_path) != 0) {
 				perror("Failed to remove existing pin");
 				return -1;
 			}
+			// Pin the new map
 			if (bpf_obj_pin(map_fd, pin_path) != 0) {
 				perror("Failed to re-pin map");
 				return -1;
@@ -88,6 +97,28 @@ int pin_map(struct bpf_object *obj, const char *map_name) {
 	return 0;
 }
 
+static int resolve_interface(const char *arg) {
+	int idx;
+	char *endptr;
+	
+	// Try to parse as integer first
+	idx = strtol(arg, &endptr, 10);
+	if (*endptr == '\0' && idx > 0) {
+		// It's a valid integer index
+		return idx;
+	}
+	
+	// Try to resolve as interface name
+	idx = if_nametoindex(arg);
+	if (idx == 0) {
+		fprintf(stderr, "Error: Interface '%s' not found\n", arg);
+		return -1;
+	}
+	
+	printf("Resolved interface '%s' to index %d\n", arg, idx);
+	return idx;
+}
+
 int main(int argc, char *argv[])
 {
 	struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY};
@@ -98,11 +129,14 @@ int main(int argc, char *argv[])
 	int err, prog_count;
 	__u32 xdp_flags = 0;
 	int *interfaces_idx;
+	struct bpf_tc_hook *tc_hooks = NULL;
 	int ret = 0;
 
 	int interface_count = argc - 1;
 	if (interface_count <= 0) {
-		fprintf(stderr, "Missing at least one required interface index\n");
+		fprintf(stderr, "Usage: %s <interface_index_or_name> [interface_index_or_name ...]\n", argv[0]);
+		fprintf(stderr, "Examples: %s 38\n", argv[0]);
+		fprintf(stderr, "Examples: %s enp52s0f1np1\n", argv[0]);
 		exit(EXIT_FAILURE);
 	}
 
@@ -113,12 +147,12 @@ int main(int argc, char *argv[])
 	}
 
 	for (int i = 0; i < interface_count; i++) {
-        interfaces_idx[i] = atoi(argv[i + 1]);
-        if (interfaces_idx[i] <= 0) {
-            fprintf(stderr, "Invalid interface index: %s\n", argv[i + 1]);
-            free(interfaces_idx);
-            exit(EXIT_FAILURE);
-        }
+		int idx = resolve_interface(argv[i + 1]);
+		if (idx <= 0) {
+			free(interfaces_idx);
+			exit(EXIT_FAILURE);
+		}
+		interfaces_idx[i] = idx;
     }
 
 	xdp_flags |= XDP_FLAGS_DRV_MODE;
@@ -244,7 +278,7 @@ retry:
 
 	for (int i = 0; i < interface_count; i++) {
 		if (bpf_xdp_attach(interfaces_idx[i], xdp_main_prog_fd, xdp_flags, NULL) < 0) {
-			fprintf(stderr, "Error: bpf_xdp_attach failed for interface %d\n", interfaces_idx[i]);
+			fprintf(stderr, "Error: bpf_xdp_attach failed for interface %d: %s (errno=%d)\n", interfaces_idx[i], strerror(errno), errno);
 			return 1;
 		} else {
 			printf("Main BPF program attached to XDP on interface %d\n", interfaces_idx[i]);
@@ -255,6 +289,52 @@ retry:
 	for (int i = 0; i < map_count; i++) {
 		if (pin_map(obj, maps[i].map_name) < 0)
 			return -1;
+	}
+
+	// Attach TC ingress program to each interface
+	tc_hooks = calloc(interface_count, sizeof(*tc_hooks));
+	if (!tc_hooks) {
+		fprintf(stderr, "Error: failed to allocate memory for tc_hooks\n");
+		return 1;
+	}
+
+	int tc_prog_fd = bpf_program__fd(progs[1].prog);
+	if (tc_prog_fd < 0) {
+		fprintf(stderr, "Error: failed to get TC program fd\n");
+		return 1;
+	}
+
+	for (int i = 0; i < interface_count; i++) {
+		tc_hooks[i].sz = sizeof(tc_hooks[i]);
+		tc_hooks[i].ifindex = interfaces_idx[i];
+
+		// Tear down any stale clsact qdisc from a previous crash (best-effort;
+		// EINVAL is expected on clean restarts where cleanup already ran)
+		libbpf_set_print(NULL);
+		tc_hooks[i].attach_point = BPF_TC_INGRESS | BPF_TC_EGRESS;
+		bpf_tc_hook_destroy(&tc_hooks[i]);
+		libbpf_set_print(print_bpf_verifier);
+
+		tc_hooks[i].attach_point = BPF_TC_INGRESS;
+		err = bpf_tc_hook_create(&tc_hooks[i]);
+		if (err) {
+			fprintf(stderr, "Error: bpf_tc_hook_create failed for interface %d: %s\n",
+				interfaces_idx[i], strerror(-err));
+			return 1;
+		}
+
+		struct bpf_tc_opts tc_opts = {
+			.sz = sizeof(tc_opts),
+			.prog_fd = tc_prog_fd,
+			.flags = BPF_TC_F_REPLACE,
+		};
+		err = bpf_tc_attach(&tc_hooks[i], &tc_opts);
+		if (err) {
+			fprintf(stderr, "Error: bpf_tc_attach failed for interface %d: %s\n",
+				interfaces_idx[i], strerror(-err));
+			return 1;
+		}
+		printf("TC ingress program attached to interface %d\n", interfaces_idx[i]);
 	}
 
 	int sig, quit = 0;
@@ -285,8 +365,14 @@ retry:
 	}
 
 	for (int i = 0; i < interface_count; i++) {
+		if (tc_hooks) {
+			tc_hooks[i].attach_point = BPF_TC_INGRESS | BPF_TC_EGRESS;
+			bpf_tc_hook_destroy(&tc_hooks[i]);
+		}
 		bpf_xdp_attach(interfaces_idx[i], -1, xdp_flags, NULL);
 	}
+	free(tc_hooks);
+	free(interfaces_idx);
 
 	return ret;
 }

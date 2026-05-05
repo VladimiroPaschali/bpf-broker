@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-IFACE="enp65s0f0np0"
+IFACE="enp52s0f1np1"
 BPF_PIN_PATH="/sys/fs/bpf/tc_ingress_broker"
 
 echo "Step 1: Removing existing filters (if any)..."
