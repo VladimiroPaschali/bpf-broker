@@ -69,7 +69,7 @@ static __always_inline __u16 compute_ip_checksum(struct iphdr *ip)
     return ~csum;
 }
 
-static __always_inline __u16 compute_udp_checksum(struct iphdr *ip, struct udphdr *udp, void *payload_start, void *data_end)
+static __always_inline __u16 compute_udp_checksum(struct iphdr *ip, struct udphdr *udp, void *data_end)
 {
     __u32 csum = 0;
     __u32 udp_len = bpf_ntohs(udp->len);
@@ -84,7 +84,7 @@ static __always_inline __u16 compute_udp_checksum(struct iphdr *ip, struct udphd
     __u16 *ptr = (__u16 *)udp;
 
 #pragma unroll
-    for (int i = 0; i < 128; i++) {
+    for (int i = 0; i < 1024; i++) {
         if ((void *)(ptr + 1) > data_end || (i << 1) >= udp_len)
             break;
 
@@ -188,30 +188,44 @@ int xdp_broker(struct xdp_md *ctx)
          */
         __u32 num_copy = *(__u32 *)data_meta;
         // bpf_printk("clone copy #%d\n", num_copy);
-        if (num_copy == 0)
+        if (num_copy == 0){
+            // bpf_printk("invalid copy index\n");
             return XDP_DROP;
+        }
 
-        if (parse_udp_packet(ctx, &data, &data_end, &eth, &ip, &udp, &payload) < 0)
+        if (parse_udp_packet(ctx, &data, &data_end, &eth, &ip, &udp, &payload) < 0){
+            // bpf_printk("failed to parse UDP packet\n");
             return XDP_DROP;
+        }
 
         dport = bpf_ntohs(udp->dest);
-        if (dport < 49152 || dport > 49167)
+        if (dport < 49152 || dport > 49167){
+            // bpf_printk("not target port %d\n", dport);
             return XDP_DROP;
+        }
 
-        if (!starts_with(payload, "PUBLISH ", data_end))
+        if (!starts_with(payload, "PUBLISH ", data_end)){
+            // bpf_printk("not a PUBLISH packet\n");
             return XDP_DROP;
+        }
 
-        if (extract_topic_id(payload + 8, data_end, topic_id) < 0)
+        if (extract_topic_id(payload + 8, data_end, topic_id) < 0){
+            // bpf_printk("failed to extract topic ID\n");
             return XDP_DROP;
+        }
 
         void *inner_map = bpf_map_lookup_elem(&topic_sub_array, &topic_id);
-        if (!inner_map)
+        if (!inner_map){
+            // bpf_printk("failed to lookup inner map for topic '%s'\n", topic_id);
             return XDP_DROP;
+        }
 
         __u32 idx = num_copy - 1;
         __u64 *packed_ptr = bpf_map_lookup_elem(inner_map, &idx);
-        if (!packed_ptr)
+        if (!packed_ptr){
+            // bpf_printk("failed to lookup subscriber for copy #%d\n", num_copy);
             return XDP_DROP;
+        }
 
         __u64 packed = *packed_ptr;
         __u32 dest_ip   = packed >> 32;
@@ -233,25 +247,25 @@ int xdp_broker(struct xdp_md *ctx)
         udp->source = udp->dest;
         udp->dest   = dest_port_net;
         udp->check  = 0;
-        udp->check  = compute_udp_checksum(ip, udp, udp + 1, data_end);
+        udp->check  = compute_udp_checksum(ip, udp,  data_end);
 
         return XDP_TX;
     }
 
     /* Original packet: if it's a PUBLISH, spawn one clone per subscriber. */
     if (parse_udp_packet(ctx, &data, &data_end, &eth, &ip, &udp, &payload) < 0){
-        bpf_printk("failed to parse UDP packet\n");
+        // bpf_printk("failed to parse UDP packet\n");
         return XDP_PASS;
     }
 
     dport = bpf_ntohs(udp->dest);
     if (dport < 49152 || dport > 49167){
-        bpf_printk("not target port %d\n", dport);
+        // bpf_printk("not target port %d\n", dport);
         return XDP_PASS;
     }
 
     if (!starts_with(payload, "PUBLISH ", data_end)){
-        bpf_printk("not a PUBLISH packet\n");
+        // bpf_printk("not a PUBLISH packet\n");
         return XDP_PASS;
     }
     __u32 cnt_idx = 0;
@@ -260,13 +274,13 @@ int xdp_broker(struct xdp_md *ctx)
         __sync_fetch_and_add(p_counter, 1);
 
     if (extract_topic_id(payload + 8, data_end, topic_id) < 0){
-        bpf_printk("failed to extract topic ID\n");
+        // bpf_printk("failed to extract topic ID\n");
         return XDP_PASS;
     }
 
     __u32 *sub_count = bpf_map_lookup_elem(&topic_sub_cnt, &topic_id);
     if (!sub_count || *sub_count == 0){
-        bpf_printk("no subscribers for topic '%s'\n", topic_id);
+        // bpf_printk("no subscribers for topic '%s'\n", topic_id);
         return XDP_PASS;
     }
     // bpf_printk("topic '%s' has %d subscribers\n", topic_id, *sub_count);
