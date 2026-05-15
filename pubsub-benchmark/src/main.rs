@@ -33,6 +33,24 @@ struct Args {
     /// Max packets per second per publisher thread (0 = unlimited)
     #[arg(long, default_value_t = 0)]
     rate_pps: u64,
+    /// Find No-Drop Rate via binary search (tx_msgs == rx_msgs * subs)
+    #[arg(long, default_value_t = false)]
+    ndr: bool,
+    /// Upper bound for NDR binary search (pps)
+    #[arg(long, default_value_t = 1_000_000)]
+    ndr_max_pps: u64,
+    /// Lower bound for NDR binary search (pps)
+    #[arg(long, default_value_t = 0)]
+    ndr_min_pps: u64,
+    /// Acceptable drop fraction for NDR (0.0 = zero loss, 0.001 = 0.1%)
+    #[arg(long, default_value = "0.0")]
+    ndr_tolerance: f64,
+    /// Duration of each NDR trial in seconds
+    #[arg(long, default_value_t = 3)]
+    ndr_trial_duration: u64,
+    /// Number of binary search iterations for NDR
+    #[arg(long, default_value_t = 10)]
+    ndr_iterations: u32,
 }
 
 fn register_topic(topic: &str, broker: SocketAddr) {
@@ -55,6 +73,13 @@ fn register_topic(topic: &str, broker: SocketAddr) {
             println!("[!] No response from broker (timeout): {}", e);
         }
     }
+}
+
+fn flush_topic(topic: &str, broker: SocketAddr) {
+    let sock = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind flush socket");
+    let msg = format!("FLUSH {}", topic);
+    let _ = sock.send_to(msg.as_bytes(), broker);
+    thread::sleep(Duration::from_millis(300));
 }
 
 /// Parse timestamp from raw message bytes: "PUBLISH <topic> <ts> <payload>"
@@ -377,59 +402,55 @@ fn spawn_publisher_thread(
     });
 }
 
-fn main() {
-    let args = Args::parse();
-    let sub_workers = args.subs.min(32);
+struct BenchmarkResult {
+    tx_msgs: usize,
+    rx_msgs: usize,
+    latencies: Vec<u128>,
+}
 
-    let broker_addr: SocketAddr = format!("{}:{}", args.broker_ip, args.broker_port)
-        .parse()
-        .expect("Invalid broker address");
-
-    let rate_str = if args.rate_pps > 0 {
-        format!(" rate={}pps ({:.0}Mbit/s)", args.rate_pps,
-            args.rate_pps as f64 * args.size as f64 * 8.0 / 1_000_000.0)
-    } else {
-        " rate=unlimited".to_string()
-    };
-    println!(
-        "[*] Starting {} publishers and {} subscribers ({} worker threads) targeting {} for {}s, msg_size: {}B{}{}",
-        args.pubs, args.subs, sub_workers, broker_addr, args.duration, args.size,
-        rate_str,
-        if args.sink { " [sink]" } else { "" },
-    );
-
+/// Run a single benchmark trial and return aggregate counts.
+/// `verbose` enables the per-second interval reporter.
+/// `sink` forces subscribers to skip timestamp parsing.
+fn run_benchmark(
+    topic: &str,
+    broker_addr: SocketAddr,
+    broker_ip: &str,
+    subs: usize,
+    pubs: usize,
+    msg_size: usize,
+    duration: Duration,
+    rate_pps: u64,
+    sink: bool,
+    verbose: bool,
+) -> BenchmarkResult {
     let global_counter = Arc::new(AtomicUsize::new(0));
-    let recv_counter  = Arc::new(AtomicUsize::new(0));
-    let running = Arc::new(AtomicBool::new(true));
-    let duration = Duration::from_secs(args.duration);
+    let recv_counter   = Arc::new(AtomicUsize::new(0));
+    let running        = Arc::new(AtomicBool::new(true));
+    let sub_workers    = subs.min(32);
 
-    register_topic(&args.topic, broker_addr);
-
-    // Subscriber workers — cap real threads at 32 and partition logical subscribers.
     let sub_handles: Vec<_> = if sub_workers == 0 {
         Vec::new()
     } else {
         let mut groups: Vec<Vec<usize>> = vec![Vec::new(); sub_workers];
-        for (idx, sub_id) in (0..args.subs).enumerate() {
+        for (idx, sub_id) in (0..subs).enumerate() {
             groups[idx % sub_workers].push(sub_id);
         }
-        groups
-            .into_iter()
+        groups.into_iter()
             .map(|ids| spawn_subscriber_worker(
-                args.topic.clone(), ids, broker_addr, running.clone(), args.sink,
+                topic.to_string(), ids, broker_addr, running.clone(), sink,
                 recv_counter.clone(),
             ))
             .collect()
     };
 
+    // Give subscribers time to register with the broker before sending traffic.
     thread::sleep(Duration::from_millis(500));
 
-    // Throughput reporter — TX and RX side by side
-    {
-        let tx_counter = global_counter.clone();
-        let rx_counter = recv_counter.clone();
-        let duration_secs = args.duration;
-        let msg_size = args.size;
+    if verbose {
+        let tx_counter    = global_counter.clone();
+        let rx_counter    = recv_counter.clone();
+        let duration_secs = duration.as_secs();
+        let msg_size_cp   = msg_size;
         thread::spawn(move || {
             let mut last_tx = 0usize;
             let mut last_rx = 0usize;
@@ -439,101 +460,217 @@ fn main() {
             );
             for second in 1..=duration_secs {
                 thread::sleep(Duration::from_secs(1));
-
                 let tx = tx_counter.load(Ordering::Relaxed);
                 let rx = rx_counter.load(Ordering::Relaxed);
                 let dtx = tx - last_tx;
                 let drx = rx - last_rx;
                 last_tx = tx;
                 last_rx = rx;
-
-                let tx_mbits = (dtx * msg_size * 8) as f64 / 1_000_000.0;
-                let rx_mbits = (drx * msg_size * 8) as f64 / 1_000_000.0;
-
                 println!(
                     "{:>2}.0-{:<2}.0 sec    {:>10}  {:>10.2}  {:>10}  {:>10.2}",
                     second - 1, second,
-                    dtx, tx_mbits,
-                    drx, rx_mbits,
+                    dtx, (dtx * msg_size_cp * 8) as f64 / 1_000_000.0,
+                    drx, (drx * msg_size_cp * 8) as f64 / 1_000_000.0,
                 );
             }
         });
     }
 
     let dest_ports: Vec<u16> = (49152..49168).collect();
-
-    for _ in 0..args.pubs {
+    for _ in 0..pubs {
         spawn_publisher_thread(
             duration,
-            args.topic.clone(),
-            args.broker_ip.clone(),
+            topic.to_string(),
+            broker_ip.to_string(),
             dest_ports.clone(),
             global_counter.clone(),
-            args.size,
-            args.rate_pps,
+            msg_size,
+            rate_pps,
         );
     }
 
     thread::sleep(duration + Duration::from_secs(2));
     running.store(false, Ordering::Relaxed);
 
-    let final_tx = global_counter.load(Ordering::Relaxed);
+    let tx_msgs = global_counter.load(Ordering::Relaxed);
 
-    // Collect per-thread results — no mutex, just join
-    let results: Vec<SubResult> = sub_handles
-        .into_iter()
+    let results: Vec<SubResult> = sub_handles.into_iter()
         .filter_map(|h| h.join().ok())
         .collect();
 
-    let total_raw: usize = results.iter().map(|r| r.raw_received).sum();
-    let mut all_latencies: Vec<u128> = if args.sink {
+    let rx_msgs: usize = results.iter().map(|r| r.raw_received).sum();
+    let latencies: Vec<u128> = if sink {
         Vec::new()
     } else {
-        results
-            .into_iter()
+        results.into_iter()
             .filter_map(|r| r.latencies)
             .flatten()
             .collect()
     };
 
+    BenchmarkResult { tx_msgs, rx_msgs, latencies }
+}
+
+fn print_results(result: &mut BenchmarkResult, duration_secs: u64, msg_size: usize, sink: bool) {
     println!("\n=== Final Results ===");
     println!(
         "TX: {:>10} msgs   {:.2} msgs/sec   {:.2} Mbit/s",
-        final_tx,
-        final_tx as f64 / args.duration as f64,
-        (final_tx * args.size * 8) as f64 / 1_000_000.0 / args.duration as f64,
+        result.tx_msgs,
+        result.tx_msgs as f64 / duration_secs as f64,
+        (result.tx_msgs * msg_size * 8) as f64 / 1_000_000.0 / duration_secs as f64,
     );
     println!(
         "RX: {:>10} msgs   {:.2} msgs/sec   {:.2} Mbit/s",
-        total_raw,
-        total_raw as f64 / args.duration as f64,
-        (total_raw * args.size * 8) as f64 / 1_000_000.0 / args.duration as f64,
+        result.rx_msgs,
+        result.rx_msgs as f64 / duration_secs as f64,
+        (result.rx_msgs * msg_size * 8) as f64 / 1_000_000.0 / duration_secs as f64,
     );
 
-    if args.sink {
+    if sink {
         println!("Latency analysis disabled in sink mode.");
-    } else if !all_latencies.is_empty() {
-        let min = *all_latencies.iter().min().unwrap();
-        let max = *all_latencies.iter().max().unwrap();
-        let avg = all_latencies.iter().sum::<u128>() as f64 / all_latencies.len() as f64;
-        all_latencies.sort_unstable();
-        let n = all_latencies.len();
-        let p50 = all_latencies[n * 50 / 100];
-        let p90 = all_latencies[n * 90 / 100];
-        let p99 = all_latencies[n * 99 / 100];
+    } else if !result.latencies.is_empty() {
+        let min = *result.latencies.iter().min().unwrap();
+        let max = *result.latencies.iter().max().unwrap();
+        let avg = result.latencies.iter().sum::<u128>() as f64 / result.latencies.len() as f64;
+        result.latencies.sort_unstable();
+        let n   = result.latencies.len();
+        let p50 = result.latencies[n * 50 / 100];
+        let p90 = result.latencies[n * 90 / 100];
+        let p99 = result.latencies[n * 99 / 100];
         println!(
             "Latency (us): received={}, min={}, max={}, avg={:.0}, p50={:.0}, p90={:.0}, p99={:.0}",
             n,
-            min / 1000,
-            max / 1000,
-            avg / 1000.0,
-            p50 / 1000,
-            p90 / 1000,
-            p99 / 1000
+            min / 1000, max / 1000, avg / 1000.0,
+            p50 / 1000, p90 / 1000, p99 / 1000,
         );
-    } else if total_raw > 0 {
-        println!("Packets arrived ({}) but timestamp parse failed — check message format.", total_raw);
+    } else if result.rx_msgs > 0 {
+        println!("Packets arrived ({}) but timestamp parse failed — check message format.", result.rx_msgs);
     } else {
         println!("No packets received by subscribers.");
+    }
+}
+
+/// Binary search for the highest rate (pps) at which
+/// rx_msgs >= tx_msgs * subs * (1 - tolerance).
+fn find_ndr(args: &Args, broker_addr: SocketAddr) -> u64 {
+    let mut lo = args.ndr_min_pps;
+    let mut hi = args.ndr_max_pps;
+    let trial_dur = Duration::from_secs(args.ndr_trial_duration);
+
+    println!(
+        "[NDR] Binary search: {} iterations, trial={}s, tolerance={:.3}%",
+        args.ndr_iterations, args.ndr_trial_duration, args.ndr_tolerance * 100.0
+    );
+    println!("[NDR] Range: [{}, {}] pps", lo, hi);
+
+    for iter in 0..args.ndr_iterations {
+        if hi <= lo { break; }
+        let mid = lo + (hi - lo) / 2;
+        if mid == 0 { break; }
+
+        flush_topic(&args.topic, broker_addr);
+        register_topic(&args.topic, broker_addr);
+
+        // Use sink=true for trials: we only care about packet counts, not latency.
+        let result = run_benchmark(
+            &args.topic, broker_addr, &args.broker_ip,
+            args.subs, args.pubs, args.size,
+            trial_dur, mid,
+            true,  // sink
+            false, // no interval table during search
+        );
+
+        let expected_rx = result.tx_msgs * args.subs;
+        let drop_count  = expected_rx.saturating_sub(result.rx_msgs);
+        let drop_frac   = if expected_rx > 0 {
+            drop_count as f64 / expected_rx as f64
+        } else {
+            1.0
+        };
+        let pass = drop_frac <= args.ndr_tolerance;
+
+        println!(
+            "[NDR] iter {:2}: {:>8} pps  tx={:>8}  rx={:>8}  exp={:>8}  drop={:.3}%  {}",
+            iter + 1, mid,
+            result.tx_msgs, result.rx_msgs, expected_rx,
+            drop_frac * 100.0,
+            if pass { "PASS" } else { "FAIL" }
+        );
+
+        if pass { lo = mid; } else { hi = mid; }
+
+        if hi.saturating_sub(lo) <= 100 { break; }
+    }
+
+    lo
+}
+
+fn main() {
+    let args = Args::parse();
+    let sub_workers = args.subs.min(32);
+
+    let broker_addr: SocketAddr = format!("{}:{}", args.broker_ip, args.broker_port)
+        .parse()
+        .expect("Invalid broker address");
+
+    if args.ndr {
+        println!(
+            "[*] NDR mode: {} pub(s), {} sub(s) ({} workers), broker={}, final_duration={}s, size={}B{}",
+            args.pubs, args.subs, sub_workers, broker_addr,
+            args.duration, args.size,
+            if args.sink { " [sink]" } else { "" },
+        );
+
+        let ndr_rate = find_ndr(&args, broker_addr);
+
+        println!(
+            "\n[NDR] Converged: {} pps  ({:.2} Mbit/s)",
+            ndr_rate,
+            ndr_rate as f64 * args.size as f64 * 8.0 / 1_000_000.0
+        );
+
+        println!("[NDR] Final measurement at {} pps for {}s...", ndr_rate, args.duration);
+        flush_topic(&args.topic, broker_addr);
+        register_topic(&args.topic, broker_addr);
+
+        let mut result = run_benchmark(
+            &args.topic, broker_addr, &args.broker_ip,
+            args.subs, args.pubs, args.size,
+            Duration::from_secs(args.duration),
+            ndr_rate, args.sink, true,
+        );
+
+        print_results(&mut result, args.duration, args.size, args.sink);
+        // Machine-parseable summary line for run_sweep.sh
+        println!(
+            "NDR: {} pps  {:.2} Mbit/s",
+            ndr_rate,
+            ndr_rate as f64 * args.size as f64 * 8.0 / 1_000_000.0
+        );
+
+    } else {
+        let rate_str = if args.rate_pps > 0 {
+            format!(" rate={}pps ({:.0}Mbit/s)", args.rate_pps,
+                args.rate_pps as f64 * args.size as f64 * 8.0 / 1_000_000.0)
+        } else {
+            " rate=unlimited".to_string()
+        };
+        println!(
+            "[*] Starting {} publishers and {} subscribers ({} worker threads) targeting {} for {}s, msg_size: {}B{}{}",
+            args.pubs, args.subs, sub_workers, broker_addr, args.duration, args.size,
+            rate_str,
+            if args.sink { " [sink]" } else { "" },
+        );
+
+        register_topic(&args.topic, broker_addr);
+
+        let mut result = run_benchmark(
+            &args.topic, broker_addr, &args.broker_ip,
+            args.subs, args.pubs, args.size,
+            Duration::from_secs(args.duration),
+            args.rate_pps, args.sink, true,
+        );
+
+        print_results(&mut result, args.duration, args.size, args.sink);
     }
 }

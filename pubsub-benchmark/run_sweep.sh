@@ -6,40 +6,89 @@ TOPIC="2test"
 PUBS=1
 BROKER_IP="192.168.101.1"
 DURATION=10
-OUTPUT="results_$(date +%Y%m%d_%H%M%S).csv"
-
 SUBS_LIST=(1 2 4 8 16 32 64)
-SIZE_LIST=(64)
+SIZE_LIST=(64 128 256 512 1024)
 
-# Limit TX to keep bandwidth well below link capacity (adjust for your NIC).
+# ── Mode ──────────────────────────────────────────────────────────────────────
+# Set MODE="RATE_PPS" to send at a fixed rate (default).
+# Set MODE="NDR" to binary-search for the No-Drop Rate per (size, subs) combo.
+# MODE="RATE_PPS"
+MODE="NDR"
+
+# ── RATE_PPS settings ────────────────────────────────────────────────────────
 # Formula: RATE_PPS * SIZE * 8 / 1e6 = Mbit/s
-# Example: 300000 * 256 * 8 / 1e6 = 614 Mbit/s  (safe for 1 GbE)
-RATE_PPS=0
+# Example: 15000 * 64 * 8 / 1e6 = 7.68 Mbit/s
+RATE_PPS=15000
 SINK=1
+
+# ── NDR settings ─────────────────────────────────────────────────────────────
+# NDR_MAX_PPS   : upper bound for binary search (pps)
+# NDR_TRIAL_SECS: probe duration per iteration (shorter = faster, noisier)
+# NDR_TOLERANCE : acceptable drop fraction (0.0 = strict no-drop)
+# NDR_ITERATIONS: binary search depth (10 → ~0.1% precision of the range)
+NDR_MAX_PPS=2000000
+NDR_MIN_PPS=0
+NDR_TRIAL_SECS=5
+NDR_TOLERANCE=0.01
+NDR_ITERATIONS=20
 
 #lat
 # RATE_PPS=128
 # SINK=0
 
-echo "size,subs,tx_msgs,tx_msgs_sec,tx_mbit_s,rx_msgs,rx_msgs_sec,rx_mbit_s,lat_received,min_us,max_us,avg_us,p50_us,p90_us,p99_us" > "$OUTPUT"
+# ── Output file ───────────────────────────────────────────────────────────────
+OUTPUT="${MODE}_results_$(date +%Y%m%d_%H%M%S).csv"
+
+if [[ "$MODE" == "NDR" ]]; then
+    echo "size,subs,ndr_pps,tx_msgs,tx_msgs_sec,tx_mbit_s,rx_msgs,rx_msgs_sec,rx_mbit_s,lat_received,min_us,max_us,avg_us,p50_us,p90_us,p99_us" > "$OUTPUT"
+else
+    echo "size,subs,tx_msgs,tx_msgs_sec,tx_mbit_s,rx_msgs,rx_msgs_sec,rx_mbit_s,lat_received,min_us,max_us,avg_us,p50_us,p90_us,p99_us" > "$OUTPUT"
+fi
 
 for SIZE in "${SIZE_LIST[@]}"; do
     for SUBS in "${SUBS_LIST[@]}"; do
-        echo ">>> Running: size=${SIZE}B  subs=${SUBS}  rate=${RATE_PPS}pps ..."
+        echo ">>> Flushing broker state for topic '${TOPIC}'..."
+        printf "FLUSH %s" "$TOPIC" | nc -u -w1 "$BROKER_IP" 49152 > /dev/null 2>&1
+        sleep 0.3
+
+        if [[ "$MODE" == "NDR" ]]; then
+            echo ">>> Running NDR search: size=${SIZE}B  subs=${SUBS}  max=${NDR_MAX_PPS}pps ..."
+        else
+            echo ">>> Running: size=${SIZE}B  subs=${SUBS}  rate=${RATE_PPS}pps ..."
+        fi
 
         OUTPUT_TMP=$(mktemp)
         SINK_FLAG=()
         [[ "${SINK:-0}" == "1" ]] && SINK_FLAG=(--sink)
-        "$BINARY" \
-            --topic "$TOPIC" \
-            --subs "$SUBS" \
-            --pubs "$PUBS" \
-            --size "$SIZE" \
-            --broker-ip "$BROKER_IP" \
-            --duration "$DURATION" \
-            --rate-pps "$RATE_PPS" \
-            "${SINK_FLAG[@]}" \
-            2>&1 | tee "$OUTPUT_TMP"
+
+        if [[ "$MODE" == "NDR" ]]; then
+            "$BINARY" \
+                --topic "$TOPIC"  \
+                --subs "$SUBS" \
+                --pubs "$PUBS" \
+                --size "$SIZE" \
+                --broker-ip "$BROKER_IP" \
+                --duration "$DURATION" \
+                --ndr \
+                --ndr-max-pps "$NDR_MAX_PPS" \
+                --ndr-min-pps "$NDR_MIN_PPS" \
+                --ndr-tolerance "$NDR_TOLERANCE" \
+                --ndr-trial-duration "$NDR_TRIAL_SECS" \
+                --ndr-iterations "$NDR_ITERATIONS" \
+                "${SINK_FLAG[@]}" \
+                2>&1 | tee "$OUTPUT_TMP"
+        else
+            "$BINARY" \
+                --topic "$TOPIC"  \
+                --subs "$SUBS" \
+                --pubs "$PUBS" \
+                --size "$SIZE" \
+                --broker-ip "$BROKER_IP" \
+                --duration "$DURATION" \
+                --rate-pps "$RATE_PPS" \
+                "${SINK_FLAG[@]}" \
+                2>&1 | tee "$OUTPUT_TMP"
+        fi
 
         TX_LINE=$(grep -P '^TX:' "$OUTPUT_TMP" || echo "")
         if [[ -n "$TX_LINE" ]]; then
@@ -72,10 +121,24 @@ for SIZE in "${SIZE_LIST[@]}"; do
             LAT_RECEIVED=0; MIN_US=0; MAX_US=0; AVG_US=0; P50_US=0; P90_US=0; P99_US=0
         fi
 
+        # Parse NDR rate from the dedicated summary line: "NDR: <pps> pps ..."
+        NDR_PPS=0
+        if [[ "$MODE" == "NDR" ]]; then
+            NDR_LINE=$(grep -P '^NDR:' "$OUTPUT_TMP" | tail -1 || echo "")
+            if [[ -n "$NDR_LINE" ]]; then
+                NDR_PPS=$(echo "$NDR_LINE" | grep -oP '[0-9]+(?= pps)' | head -1 || echo "0")
+            fi
+        fi
+
         rm -f "$OUTPUT_TMP"
 
-        echo "$SIZE,$SUBS,$TX_MSGS,$TX_MSGS_SEC,$TX_MBIT,$RX_MSGS,$RX_MSGS_SEC,$RX_MBIT,$LAT_RECEIVED,$MIN_US,$MAX_US,$AVG_US,$P50_US,$P90_US,$P99_US" >> "$OUTPUT"
-        echo "    -> TX=${TX_MSGS_SEC} msgs/sec  RX=${RX_MSGS_SEC} msgs/sec  p99=${P99_US}us"
+        if [[ "$MODE" == "NDR" ]]; then
+            echo "$SIZE,$SUBS,$NDR_PPS,$TX_MSGS,$TX_MSGS_SEC,$TX_MBIT,$RX_MSGS,$RX_MSGS_SEC,$RX_MBIT,$LAT_RECEIVED,$MIN_US,$MAX_US,$AVG_US,$P50_US,$P90_US,$P99_US" >> "$OUTPUT"
+            echo "    -> NDR=${NDR_PPS}pps  TX=${TX_MSGS_SEC} msgs/sec  RX=${RX_MSGS_SEC} msgs/sec  p99=${P99_US}us"
+        else
+            echo "$SIZE,$SUBS,$TX_MSGS,$TX_MSGS_SEC,$TX_MBIT,$RX_MSGS,$RX_MSGS_SEC,$RX_MBIT,$LAT_RECEIVED,$MIN_US,$MAX_US,$AVG_US,$P50_US,$P90_US,$P99_US" >> "$OUTPUT"
+            echo "    -> TX=${TX_MSGS_SEC} msgs/sec  RX=${RX_MSGS_SEC} msgs/sec  p99=${P99_US}us"
+        fi
         echo ""
     done
 done
