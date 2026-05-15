@@ -5,17 +5,21 @@ BINARY="./target/release/pubsub-benchmark"
 TOPIC="2test"
 PUBS=1
 BROKER_IP="192.168.101.1"
-DURATION=30
+DURATION=10
 OUTPUT="results_$(date +%Y%m%d_%H%M%S).csv"
 
 SUBS_LIST=(1 2 4 8 16 32 64)
-SIZE_LIST=(64 128 256 512 1024)
+SIZE_LIST=(64)
 
 # Limit TX to keep bandwidth well below link capacity (adjust for your NIC).
 # Formula: RATE_PPS * SIZE * 8 / 1e6 = Mbit/s
 # Example: 300000 * 256 * 8 / 1e6 = 614 Mbit/s  (safe for 1 GbE)
 RATE_PPS=0
 SINK=1
+
+#lat
+# RATE_PPS=128
+# SINK=0
 
 echo "size,subs,tx_msgs,tx_msgs_sec,tx_mbit_s,rx_msgs,rx_msgs_sec,rx_mbit_s,lat_received,min_us,max_us,avg_us,p50_us,p90_us,p99_us" > "$OUTPUT"
 

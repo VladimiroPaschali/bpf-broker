@@ -60,6 +60,7 @@ linux-*.tar.sign
 
 # stats
 stats/*
+*.csv
 
 # Paper
 bpf-broker.pdf

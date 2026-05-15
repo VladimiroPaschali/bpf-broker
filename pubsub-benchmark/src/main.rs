@@ -5,6 +5,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
+use std::collections::HashSet;
 use std::thread;
 use std::time::{Duration, Instant};
 use rand::distributions::{Distribution, Uniform};
@@ -122,12 +123,12 @@ fn write_u128_fixed(buf: &mut [u8], val: u128) {
 
 struct SubResult {
     raw_received: usize,
-    latencies: Vec<u128>,
+    latencies: Option<Vec<u128>>,
 }
 
-fn spawn_subscriber(
+fn spawn_subscriber_worker(
     topic: String,
-    id: usize,
+    subscriber_ids: Vec<usize>,
     broker: SocketAddr,
     running: Arc<AtomicBool>,
     sink: bool,
@@ -137,40 +138,44 @@ fn spawn_subscriber(
     const PKT_BUF: usize = 2048;
 
     thread::spawn(move || {
-        let port = (15000 + id) as u16;
-        let sock = UdpSocket::bind(("0.0.0.0", port)).expect("Failed to bind subscriber socket");
         let sub_msg = format!("SUBSCRIBE {}", topic);
-        if let Err(e) = sock.send_to(sub_msg.as_bytes(), broker) {
-            eprintln!("[!] Failed to send SUBSCRIBE: {}", e);
-        }
+        let mut sockets: Vec<(usize, UdpSocket)> = Vec::with_capacity(subscriber_ids.len());
+        for id in subscriber_ids {
+            let port = (15000 + id) as u16;
+            let sock = UdpSocket::bind(("0.0.0.0", port)).expect("Failed to bind subscriber socket");
+            if let Err(e) = sock.send_to(sub_msg.as_bytes(), broker) {
+                eprintln!("[!] Failed to send SUBSCRIBE: {}", e);
+            }
 
-        // SO_RCVBUFFORCE bypasses rmem_max cap (requires CAP_NET_ADMIN / root).
-        // Falls back to SO_RCVBUF (capped by net.core.rmem_max) if not root.
-        let rcvbuf: libc::c_int = 8 * 1024 * 1024;
-        let fd = sock.as_raw_fd();
-        unsafe {
-            let ok = libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_RCVBUFFORCE,
-                &rcvbuf as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
-            if ok != 0 {
-                libc::setsockopt(
+            // SO_RCVBUFFORCE bypasses rmem_max cap (requires CAP_NET_ADMIN / root).
+            // Falls back to SO_RCVBUF (capped by net.core.rmem_max) if not root.
+            let rcvbuf: libc::c_int = 8 * 1024 * 1024;
+            let fd = sock.as_raw_fd();
+            unsafe {
+                let ok = libc::setsockopt(
                     fd,
                     libc::SOL_SOCKET,
-                    libc::SO_RCVBUF,
+                    libc::SO_RCVBUFFORCE,
                     &rcvbuf as *const _ as *const libc::c_void,
                     std::mem::size_of::<libc::c_int>() as libc::socklen_t,
                 );
+                if ok != 0 {
+                    libc::setsockopt(
+                        fd,
+                        libc::SOL_SOCKET,
+                        libc::SO_RCVBUF,
+                        &rcvbuf as *const _ as *const libc::c_void,
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    );
+                }
             }
+            sock.set_nonblocking(true).expect("Failed to set subscriber nonblocking mode");
+            sockets.push((id, sock));
         }
-        sock.set_nonblocking(true).expect("Failed to set subscriber nonblocking mode");
 
         let mut raw_received: usize = 0;
-        let mut parse_errors: usize = 0;
-        let mut latencies: Vec<u128> = Vec::new();
+        let mut parse_error_ids: Option<HashSet<usize>> = if sink { None } else { Some(HashSet::new()) };
+        let mut latencies: Option<Vec<u128>> = if sink { None } else { Some(Vec::new()) };
 
         // Pre-allocate BATCH receive buffers and mmsghdr structures
         let mut bufs: Vec<Vec<u8>> = vec![vec![0u8; PKT_BUF]; BATCH];
@@ -184,53 +189,69 @@ fn spawn_subscriber(
         }
 
         while running.load(Ordering::Relaxed) {
-            let n = unsafe {
-                libc::recvmmsg(
-                    fd,
-                    mmsghdrs.as_mut_ptr(),
-                    BATCH as libc::c_uint,
-                    libc::MSG_DONTWAIT,
-                    std::ptr::null_mut(),
-                )
-            };
-            if n <= 0 {
-                let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or_default();
-                if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK {
-                    thread::sleep(Duration::from_millis(1));
+            let mut had_activity = false;
+            for (id, sock) in &sockets {
+                let n = unsafe {
+                    libc::recvmmsg(
+                        sock.as_raw_fd(),
+                        mmsghdrs.as_mut_ptr(),
+                        BATCH as libc::c_uint,
+                        libc::MSG_DONTWAIT,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if n <= 0 {
+                    if n < 0 {
+                        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or_default();
+                        if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK || errno == libc::EINTR {
+                            continue;
+                        }
+                    }
                     continue;
                 }
-                if errno == libc::EINTR {
+
+                had_activity = true;
+                let n = n as usize;
+                raw_received += n;
+                recv_counter.fetch_add(n, Ordering::Relaxed);
+
+                if sink {
                     continue;
                 }
-                continue;
-            }
-            let n = n as usize;
-            raw_received += n;
-            recv_counter.fetch_add(n, Ordering::Relaxed);
 
-            if sink {
-                continue;
-            }
+                let now_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
 
-            let now_ns = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-
-            for i in 0..n {
-                let pkt_len = mmsghdrs[i].msg_len as usize;
-                if let Some(sent_ns) = parse_timestamp_ns(&bufs[i][..pkt_len]) {
-                    latencies.push(now_ns.saturating_sub(sent_ns));
-                } else {
-                    parse_errors += 1;
-                    if parse_errors == 1 {
-                        eprintln!(
-                            "[!] sub#{}: cannot parse timestamp from: {:?}",
-                            id,
-                            String::from_utf8_lossy(&bufs[i][..pkt_len.min(80)])
-                        );
+                for i in 0..n {
+                    let pkt_len = mmsghdrs[i].msg_len as usize;
+                    let pkt = &bufs[i][..pkt_len];
+                    if !pkt.starts_with(b"PUBLISH ") {
+                        continue;
+                    }
+                    if let Some(sent_ns) = parse_timestamp_ns(pkt) {
+                        latencies
+                            .as_mut()
+                            .expect("latencies must exist when sink is disabled")
+                            .push(now_ns.saturating_sub(sent_ns));
+                    } else {
+                        let parse_error_ids = parse_error_ids
+                            .as_mut()
+                            .expect("parse_error_ids must exist when sink is disabled");
+                        if !parse_error_ids.contains(id) {
+                            eprintln!(
+                                "[!] sub#{}: cannot parse timestamp from: {:?}",
+                                id,
+                                String::from_utf8_lossy(&bufs[i][..pkt_len.min(80)])
+                            );
+                            parse_error_ids.insert(*id);
+                        }
                     }
                 }
+            }
+            if !had_activity {
+                thread::sleep(Duration::from_millis(1));
             }
         }
         SubResult { raw_received, latencies }
@@ -293,16 +314,17 @@ fn spawn_publisher_thread(
         let payload_chars = Uniform::new(33u8, 127u8);
         let payload: Vec<u8> = (0..payload_size).map(|_| payload_chars.sample(&mut rng)).collect();
 
-        let mut msg_buf: Vec<u8> = Vec::with_capacity(prefix.len() + TS_LEN + 1 + payload_size);
-        msg_buf.extend_from_slice(prefix.as_bytes());
-        let ts_start = msg_buf.len();
-        msg_buf.resize(ts_start + TS_LEN, b'0');
-        msg_buf.push(b' ');
-        msg_buf.extend_from_slice(&payload);
+        let mut msg_template: Vec<u8> = Vec::with_capacity(prefix.len() + TS_LEN + 1 + payload_size);
+        msg_template.extend_from_slice(prefix.as_bytes());
+        let ts_start = msg_template.len();
+        msg_template.resize(ts_start + TS_LEN, b'0');
+        msg_template.push(b' ');
+        msg_template.extend_from_slice(&payload);
 
-        // Pre-allocate sendmmsg structures. All BATCH entries share the same msg_buf
-        // (same timestamp per batch), only the destination address varies.
+        // Pre-allocate sendmmsg structures and one message buffer per packet in the batch,
+        // so each packet can carry its own timestamp.
         let mut addrs: Vec<libc::sockaddr_in> = vec![unsafe { std::mem::zeroed() }; BATCH];
+        let mut msg_bufs: Vec<Vec<u8>> = vec![msg_template; BATCH];
         let mut iovecs: Vec<libc::iovec> = vec![libc::iovec { iov_base: std::ptr::null_mut(), iov_len: 0 }; BATCH];
         let mut mmsghdrs: Vec<libc::mmsghdr> = vec![unsafe { std::mem::zeroed() }; BATCH];
 
@@ -311,18 +333,16 @@ fn spawn_publisher_thread(
         let mut total_sent: u64 = 0;
 
         while start.elapsed() < duration {
-            // One timestamp per batch — BATCH packets share it
-            let now_ns = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            write_u128_fixed(&mut msg_buf[ts_start..ts_start + TS_LEN], now_ns);
-
-            // Fill batch: each entry gets a (possibly different) destination
+            // Fill batch: each packet gets its own timestamp and destination.
             for i in 0..BATCH {
                 addrs[i] = brokers[broker_selector.sample(&mut rng)];
-                iovecs[i].iov_base = msg_buf.as_ptr() as *mut libc::c_void;
-                iovecs[i].iov_len = msg_buf.len();
+                let now_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
+                write_u128_fixed(&mut msg_bufs[i][ts_start..ts_start + TS_LEN], now_ns);
+                iovecs[i].iov_base = msg_bufs[i].as_ptr() as *mut libc::c_void;
+                iovecs[i].iov_len = msg_bufs[i].len();
 
                 let hdr = &mut mmsghdrs[i].msg_hdr;
                 hdr.msg_name = &mut addrs[i] as *mut _ as *mut libc::c_void;
@@ -359,6 +379,7 @@ fn spawn_publisher_thread(
 
 fn main() {
     let args = Args::parse();
+    let sub_workers = args.subs.min(32);
 
     let broker_addr: SocketAddr = format!("{}:{}", args.broker_ip, args.broker_port)
         .parse()
@@ -371,8 +392,8 @@ fn main() {
         " rate=unlimited".to_string()
     };
     println!(
-        "[*] Starting {} publishers and {} subscribers targeting {} for {}s, msg_size: {}B{}{}",
-        args.pubs, args.subs, broker_addr, args.duration, args.size,
+        "[*] Starting {} publishers and {} subscribers ({} worker threads) targeting {} for {}s, msg_size: {}B{}{}",
+        args.pubs, args.subs, sub_workers, broker_addr, args.duration, args.size,
         rate_str,
         if args.sink { " [sink]" } else { "" },
     );
@@ -384,13 +405,22 @@ fn main() {
 
     register_topic(&args.topic, broker_addr);
 
-    // Subscriber threads — each owns its latency Vec, no shared mutex
-    let sub_handles: Vec<_> = (0..args.subs)
-        .map(|id| spawn_subscriber(
-            args.topic.clone(), id, broker_addr, running.clone(), args.sink,
-            recv_counter.clone(),
-        ))
-        .collect();
+    // Subscriber workers — cap real threads at 32 and partition logical subscribers.
+    let sub_handles: Vec<_> = if sub_workers == 0 {
+        Vec::new()
+    } else {
+        let mut groups: Vec<Vec<usize>> = vec![Vec::new(); sub_workers];
+        for (idx, sub_id) in (0..args.subs).enumerate() {
+            groups[idx % sub_workers].push(sub_id);
+        }
+        groups
+            .into_iter()
+            .map(|ids| spawn_subscriber_worker(
+                args.topic.clone(), ids, broker_addr, running.clone(), args.sink,
+                recv_counter.clone(),
+            ))
+            .collect()
+    };
 
     thread::sleep(Duration::from_millis(500));
 
@@ -456,7 +486,15 @@ fn main() {
         .collect();
 
     let total_raw: usize = results.iter().map(|r| r.raw_received).sum();
-    let mut all_latencies: Vec<u128> = results.into_iter().flat_map(|r| r.latencies).collect();
+    let mut all_latencies: Vec<u128> = if args.sink {
+        Vec::new()
+    } else {
+        results
+            .into_iter()
+            .filter_map(|r| r.latencies)
+            .flatten()
+            .collect()
+    };
 
     println!("\n=== Final Results ===");
     println!(
@@ -472,7 +510,9 @@ fn main() {
         (total_raw * args.size * 8) as f64 / 1_000_000.0 / args.duration as f64,
     );
 
-    if !all_latencies.is_empty() {
+    if args.sink {
+        println!("Latency analysis disabled in sink mode.");
+    } else if !all_latencies.is_empty() {
         let min = *all_latencies.iter().min().unwrap();
         let max = *all_latencies.iter().max().unwrap();
         let avg = all_latencies.iter().sum::<u128>() as f64 / all_latencies.len() as f64;
