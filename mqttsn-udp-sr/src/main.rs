@@ -36,7 +36,8 @@ fn main() -> std::io::Result<()> {
 
     let base_port = 49152;
 
-    for core_id in 0..16 {
+    // for core_id in 0..16 {
+    for core_id in 0..1 {
         let port = base_port + core_id;
         let sock = Arc::new(create_reuse_socket(port)?);
         let topics = Arc::clone(&topics);
@@ -146,6 +147,18 @@ fn handle_message(
                 } else {
                     println!("[publish] No topic '{}' registered", topic);
                 }
+            }
+        }
+        Some("FLUSH") => {
+            if let Some(topic) = parts.next() {
+                if let Some(mut subs) = topics.get_mut(topic) {
+                    let count = subs.len();
+                    subs.clear();
+                    println!("[flush] Topic '{}': cleared {} subscribers", topic, count);
+                } else {
+                    println!("[flush] Topic '{}': not found", topic);
+                }
+                let _ = sock.send_to(b"FLUSHED", sender);
             }
         }
         _ => {

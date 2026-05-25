@@ -131,6 +131,45 @@ int add_subscriber(int outer_fd, int sub_count_fd, int first_sub_fd, const char 
 }
 
 
+int flush_topic(int outer_fd, int sub_count_fd, int first_sub_fd, const char *topic_name) {
+    char topic_key[MAX_TOPIC_ID_CHARS] = {0};
+    size_t len = strlen(topic_name);
+    if (len >= MAX_TOPIC_ID_CHARS) {
+        fprintf(stderr, "Topic name too long\n");
+        return -1;
+    }
+    memcpy(topic_key, topic_name, len);
+
+    __u32 inner_id;
+    if (bpf_map_lookup_elem(outer_fd, topic_key, &inner_id) < 0) {
+        fprintf(stderr, "[flush] topic '%s' not found, nothing to flush\n", topic_name);
+        return 0;
+    }
+
+    int inner_fd = bpf_map_get_fd_by_id(inner_id);
+    if (inner_fd < 0) {
+        perror("[flush] bpf_map_get_fd_by_id");
+        return -1;
+    }
+
+    /* Delete all subscriber keys by repeatedly getting the first key and deleting it. */
+    __u64 key;
+    int deleted = 0;
+    while (bpf_map_get_next_key(inner_fd, NULL, &key) == 0) {
+        bpf_map_delete_elem(inner_fd, &key);
+        deleted++;
+    }
+    close(inner_fd);
+
+    /* Reset count to 0: XDP checks sub_count == 0 → XDP_PASS (no clones). */
+    __u32 zero = 0;
+    bpf_map_update_elem(sub_count_fd, topic_key, &zero, BPF_ANY);
+    bpf_map_delete_elem(first_sub_fd, topic_key);
+
+    printf("[flush] topic '%s': removed %d subscribers\n", topic_name, deleted);
+    return 0;
+}
+
 int add_topic(int outer_fd, const char *topic_name) {
     int inner_fd;
 
@@ -310,6 +349,20 @@ int main() {
                       (struct sockaddr *)&client, client_len) < 0) {
                 perror("sendto");
             }
+        } else if (strncmp(buf, "FLUSH ", 6) == 0) {
+            char topic_key[MAX_TOPIC_ID_CHARS] = {0};
+            const char *topic_raw = buf + 6;
+            size_t topic_len = strnlen(topic_raw, MAX_TOPIC_ID_CHARS);
+            strncpy(topic_key, topic_raw, topic_len);
+            for (int i = 0; i < MAX_TOPIC_ID_CHARS; i++) {
+                if (topic_key[i] == '\n' || topic_key[i] == '\r') {
+                    topic_key[i] = '\0';
+                    break;
+                }
+            }
+            flush_topic(outer_fd, sub_count_fd, first_sub_fd, topic_key);
+            char response[] = "FLUSHED";
+            sendto(sock, response, strlen(response), 0, (struct sockaddr *)&client, client_len);
         } else {
             printf("Unknown command: '%s'\n", buf);
         }
