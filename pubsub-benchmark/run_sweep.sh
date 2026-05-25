@@ -7,7 +7,7 @@ PUBS=1
 BROKER_IP="192.168.101.1"
 DURATION=10
 SUBS_LIST=(1 2 4 8 16 32 64)
-SIZE_LIST=(64 128 256 512 1024)
+SIZE_LIST=(64)
 
 # ── Mode ──────────────────────────────────────────────────────────────────────
 # Set MODE="RATE_PPS" to send at a fixed rate (default).
@@ -33,7 +33,8 @@ NDR_TOLERANCE=0.01
 NDR_ITERATIONS=20
 
 #lat
-# RATE_PPS=128
+# MODE="RATE_PPS"
+# RATE_PPS=10000
 # SINK=0
 
 # ── Output file ───────────────────────────────────────────────────────────────
@@ -108,7 +109,7 @@ for SIZE in "${SIZE_LIST[@]}"; do
             RX_MSGS=0; RX_MSGS_SEC=0; RX_MBIT=0
         fi
 
-        LAT_LINE=$(grep -oP 'Latency \(us\):.*' "$OUTPUT_TMP" || echo "")
+        LAT_LINE=$(grep -oP 'Last-copy latency \(us\):.*' "$OUTPUT_TMP" || echo "")
         if [[ -n "$LAT_LINE" ]]; then
             LAT_RECEIVED=$(echo "$LAT_LINE" | grep -oP 'received=\K[0-9]+')
             MIN_US=$(      echo "$LAT_LINE" | grep -oP 'min=\K[0-9]+')

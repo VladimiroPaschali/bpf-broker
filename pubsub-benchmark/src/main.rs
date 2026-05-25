@@ -2,10 +2,10 @@ use clap::Parser;
 use std::net::{SocketAddr, UdpSocket};
 use std::os::unix::io::AsRawFd;
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     Arc,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::thread;
 use std::time::{Duration, Instant};
 use rand::distributions::{Distribution, Uniform};
@@ -82,8 +82,7 @@ fn flush_topic(topic: &str, broker: SocketAddr) {
     thread::sleep(Duration::from_millis(300));
 }
 
-/// Parse timestamp from raw message bytes: "PUBLISH <topic> <ts> <payload>"
-/// Returns the nanosecond timestamp without any heap allocation.
+/// Parse timestamp from raw message bytes: "PUBLISH <topic> <ts> <seq> <payload>"
 fn parse_timestamp_ns(msg: &[u8]) -> Option<u128> {
     let mut spaces = 0u8;
     let mut ts_start = 0;
@@ -97,11 +96,44 @@ fn parse_timestamp_ns(msg: &[u8]) -> Option<u128> {
             }
         }
     }
-    // timestamp goes to end of message (no payload after it)
     if spaces == 2 && ts_start < msg.len() {
         return parse_decimal_u128(&msg[ts_start..]);
     }
     None
+}
+
+/// Parse sequence number from raw message bytes: "PUBLISH <topic> <ts> <seq> <payload>"
+fn parse_seq_number(msg: &[u8]) -> Option<u64> {
+    let mut spaces = 0u8;
+    let mut seq_start = 0;
+    for (i, &b) in msg.iter().enumerate() {
+        if b == b' ' {
+            spaces += 1;
+            if spaces == 3 {
+                seq_start = i + 1;
+            } else if spaces == 4 {
+                return parse_decimal_u64(&msg[seq_start..i]);
+            }
+        }
+    }
+    if spaces == 3 && seq_start < msg.len() {
+        return parse_decimal_u64(&msg[seq_start..]);
+    }
+    None
+}
+
+fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut val: u64 = 0;
+    for &b in bytes {
+        if b < b'0' || b > b'9' {
+            return None;
+        }
+        val = val.wrapping_mul(10).wrapping_add((b - b'0') as u64);
+    }
+    Some(val)
 }
 
 fn parse_decimal_u128(bytes: &[u8]) -> Option<u128> {
@@ -148,7 +180,8 @@ fn write_u128_fixed(buf: &mut [u8], val: u128) {
 
 struct SubResult {
     raw_received: usize,
-    latencies: Option<Vec<u128>>,
+    // seq -> (send_ts_ns, max_recv_time_ns, copy_count)
+    per_packet: Option<HashMap<u64, (u128, u128, usize)>>,
 }
 
 fn spawn_subscriber_worker(
@@ -198,9 +231,11 @@ fn spawn_subscriber_worker(
             sockets.push((id, sock));
         }
 
+        const MAX_TRACKED_PKTS: usize = 500_000;
         let mut raw_received: usize = 0;
         let mut parse_error_ids: Option<HashSet<usize>> = if sink { None } else { Some(HashSet::new()) };
-        let mut latencies: Option<Vec<u128>> = if sink { None } else { Some(Vec::new()) };
+        let mut per_packet: Option<HashMap<u64, (u128, u128, usize)>> =
+            if sink { None } else { Some(HashMap::new()) };
 
         // Pre-allocate BATCH receive buffers and mmsghdr structures
         let mut bufs: Vec<Vec<u8>> = vec![vec![0u8; PKT_BUF]; BATCH];
@@ -255,22 +290,30 @@ fn spawn_subscriber_worker(
                     if !pkt.starts_with(b"PUBLISH ") {
                         continue;
                     }
-                    if let Some(sent_ns) = parse_timestamp_ns(pkt) {
-                        latencies
-                            .as_mut()
-                            .expect("latencies must exist when sink is disabled")
-                            .push(now_ns.saturating_sub(sent_ns));
-                    } else {
-                        let parse_error_ids = parse_error_ids
-                            .as_mut()
-                            .expect("parse_error_ids must exist when sink is disabled");
-                        if !parse_error_ids.contains(id) {
-                            eprintln!(
-                                "[!] sub#{}: cannot parse timestamp from: {:?}",
-                                id,
-                                String::from_utf8_lossy(&bufs[i][..pkt_len.min(80)])
-                            );
-                            parse_error_ids.insert(*id);
+                    match (parse_timestamp_ns(pkt), parse_seq_number(pkt)) {
+                        (Some(sent_ns), Some(seq)) => {
+                            let map = per_packet.as_mut()
+                                .expect("per_packet must exist when sink is disabled");
+                            if map.contains_key(&seq) {
+                                let e = map.get_mut(&seq).unwrap();
+                                if now_ns > e.1 { e.1 = now_ns; }
+                                e.2 += 1;
+                            } else if map.len() < MAX_TRACKED_PKTS {
+                                map.insert(seq, (sent_ns, now_ns, 1));
+                            }
+                        }
+                        _ => {
+                            let parse_error_ids = parse_error_ids
+                                .as_mut()
+                                .expect("parse_error_ids must exist when sink is disabled");
+                            if !parse_error_ids.contains(id) {
+                                eprintln!(
+                                    "[!] sub#{}: cannot parse timestamp/seq from: {:?}",
+                                    id,
+                                    String::from_utf8_lossy(&bufs[i][..pkt_len.min(80)])
+                                );
+                                parse_error_ids.insert(*id);
+                            }
                         }
                     }
                 }
@@ -279,7 +322,7 @@ fn spawn_subscriber_worker(
                 thread::sleep(Duration::from_millis(1));
             }
         }
-        SubResult { raw_received, latencies }
+        SubResult { raw_received, per_packet }
     })
 }
 
@@ -304,6 +347,7 @@ fn spawn_publisher_thread(
     broker_ip: String,
     dest_ports: Vec<u16>,
     global_counter: Arc<AtomicUsize>,
+    global_seq: Arc<AtomicU64>,
     msg_size: usize,
     rate_pps: u64,
 ) {
@@ -331,18 +375,22 @@ fn spawn_publisher_thread(
             })
             .collect();
 
-        // Message layout: "PUBLISH <topic> <ts_20bytes> <payload>"
+        // Message layout: "PUBLISH <topic> <ts_20bytes> <seq_10bytes> <payload>"
         let prefix = format!("PUBLISH {} ", topic);
         const TS_LEN: usize = 20;
-        let payload_size = msg_size.saturating_sub(prefix.len() + TS_LEN + 1);
+        const SEQ_LEN: usize = 10;
+        let payload_size = msg_size.saturating_sub(prefix.len() + TS_LEN + 1 + SEQ_LEN + 1);
 
         let payload_chars = Uniform::new(33u8, 127u8);
         let payload: Vec<u8> = (0..payload_size).map(|_| payload_chars.sample(&mut rng)).collect();
 
-        let mut msg_template: Vec<u8> = Vec::with_capacity(prefix.len() + TS_LEN + 1 + payload_size);
+        let mut msg_template: Vec<u8> = Vec::with_capacity(prefix.len() + TS_LEN + 1 + SEQ_LEN + 1 + payload_size);
         msg_template.extend_from_slice(prefix.as_bytes());
         let ts_start = msg_template.len();
         msg_template.resize(ts_start + TS_LEN, b'0');
+        msg_template.push(b' ');
+        let seq_start = msg_template.len();
+        msg_template.resize(seq_start + SEQ_LEN, b'0');
         msg_template.push(b' ');
         msg_template.extend_from_slice(&payload);
 
@@ -358,7 +406,7 @@ fn spawn_publisher_thread(
         let mut total_sent: u64 = 0;
 
         while start.elapsed() < duration {
-            // Fill batch: each packet gets its own timestamp and destination.
+            // Fill batch: each packet gets its own timestamp, sequence number, and destination.
             for i in 0..BATCH {
                 addrs[i] = brokers[broker_selector.sample(&mut rng)];
                 let now_ns = std::time::SystemTime::now()
@@ -366,6 +414,8 @@ fn spawn_publisher_thread(
                     .unwrap()
                     .as_nanos();
                 write_u128_fixed(&mut msg_bufs[i][ts_start..ts_start + TS_LEN], now_ns);
+                let seq = global_seq.fetch_add(1, Ordering::Relaxed) as u128;
+                write_u128_fixed(&mut msg_bufs[i][seq_start..seq_start + SEQ_LEN], seq);
                 iovecs[i].iov_base = msg_bufs[i].as_ptr() as *mut libc::c_void;
                 iovecs[i].iov_len = msg_bufs[i].len();
 
@@ -424,6 +474,7 @@ fn run_benchmark(
     verbose: bool,
 ) -> BenchmarkResult {
     let global_counter = Arc::new(AtomicUsize::new(0));
+    let global_seq     = Arc::new(AtomicU64::new(0));
     let recv_counter   = Arc::new(AtomicUsize::new(0));
     let running        = Arc::new(AtomicBool::new(true));
     let sub_workers    = subs.min(32);
@@ -484,6 +535,7 @@ fn run_benchmark(
             broker_ip.to_string(),
             dest_ports.clone(),
             global_counter.clone(),
+            global_seq.clone(),
             msg_size,
             rate_pps,
         );
@@ -502,9 +554,19 @@ fn run_benchmark(
     let latencies: Vec<u128> = if sink {
         Vec::new()
     } else {
-        results.into_iter()
-            .filter_map(|r| r.latencies)
-            .flatten()
+        // Merge per-packet maps from all workers: find max recv_time and total copy count per seq.
+        // A packet contributes a latency sample only when all `subs` copies have been accounted for.
+        let mut global: HashMap<u64, (u128, u128, usize)> = HashMap::new();
+        for map in results.into_iter().filter_map(|r| r.per_packet) {
+            for (seq, (send_ts, max_recv, count)) in map {
+                let e = global.entry(seq).or_insert((send_ts, 0, 0));
+                if max_recv > e.1 { e.1 = max_recv; }
+                e.2 += count;
+            }
+        }
+        global.into_values()
+            .filter(|(_, _, count)| *count == subs)
+            .map(|(send_ts, max_recv, _)| max_recv.saturating_sub(send_ts))
             .collect()
     };
 
@@ -538,7 +600,7 @@ fn print_results(result: &mut BenchmarkResult, duration_secs: u64, msg_size: usi
         let p90 = result.latencies[n * 90 / 100];
         let p99 = result.latencies[n * 99 / 100];
         println!(
-            "Latency (us): received={}, min={}, max={}, avg={:.0}, p50={:.0}, p90={:.0}, p99={:.0}",
+            "Last-copy latency (us): received={}, min={}, max={}, avg={:.0}, p50={:.0}, p90={:.0}, p99={:.0}",
             n,
             min / 1000, max / 1000, avg / 1000.0,
             p50 / 1000, p90 / 1000, p99 / 1000,
